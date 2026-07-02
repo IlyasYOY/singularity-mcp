@@ -148,6 +148,7 @@ func toolForGroup(group *singularity.ToolGroup) mcp.Tool {
 			body := cloneSchema(op.BodySchema)
 			body["description"] = "Create/update payload using exact Swagger field names."
 			body["additionalProperties"] = true
+			decorateNoteBodySchema(op, body)
 			props["body"] = body
 		}
 	}
@@ -180,6 +181,24 @@ func operationNames(group *singularity.ToolGroup) []string {
 		names = append(names, op.Name)
 	}
 	return names
+}
+
+func decorateNoteBodySchema(op *singularity.Operation, body map[string]any) {
+	if op == nil || (op.Tag != "task" && op.Tag != "project") || (op.Name != "create" && op.Name != "update") {
+		return
+	}
+	props, _ := body["properties"].(map[string]any)
+	if props == nil {
+		props = map[string]any{}
+		body["properties"] = props
+	}
+	if note, ok := props["note"].(map[string]any); ok {
+		note["description"] = "Plain text note. Do not pass JSON or Quill Delta; use noteText for clarity."
+	}
+	props["noteText"] = map[string]any{
+		"type":        "string",
+		"description": "Plain text note alias. The MCP server sends it to Singularity as note.",
+	}
 }
 
 func capabilities(catalog *singularity.Catalog) map[string]any {

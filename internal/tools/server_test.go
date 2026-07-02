@@ -46,8 +46,19 @@ func TestToolSchemasAndResources(t *testing.T) {
 		}
 		if tool.Name == "singularity_tasks" {
 			raw, _ := json.Marshal(tool.InputSchema)
-			if !strings.Contains(string(raw), "inbox") || !strings.Contains(string(raw), "compact") {
+			schema := string(raw)
+			if !strings.Contains(schema, "inbox") || !strings.Contains(schema, "compact") {
 				t.Fatalf("task schema missing inbox/compact: %s", raw)
+			}
+			if !strings.Contains(schema, "noteText") || !strings.Contains(schema, "Do not pass JSON or Quill Delta") {
+				t.Fatalf("task schema missing plain note guidance: %s", raw)
+			}
+		}
+		if tool.Name == "singularity_projects" {
+			raw, _ := json.Marshal(tool.InputSchema)
+			schema := string(raw)
+			if !strings.Contains(schema, "noteText") || !strings.Contains(schema, "Do not pass JSON or Quill Delta") {
+				t.Fatalf("project schema missing plain note guidance: %s", raw)
 			}
 		}
 	}

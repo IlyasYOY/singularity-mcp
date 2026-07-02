@@ -56,6 +56,79 @@ func TestClientRequestEncoding(t *testing.T) {
 	}
 }
 
+func TestClientNormalizesNoteText(t *testing.T) {
+	catalog := testCatalog(t)
+	op, _ := catalog.Operation("singularity_tasks", "create")
+
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Write([]byte(`{"id":"T-1"}`))
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	_, err := client.Call(context.Background(), op, map[string]any{
+		"body": map[string]any{"title": "Task", "noteText": "plain note"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["note"] != "plain note" {
+		t.Fatalf("note = %#v", got["note"])
+	}
+	if _, ok := got["noteText"]; ok {
+		t.Fatalf("noteText was sent: %#v", got)
+	}
+}
+
+func TestClientConvertsDeltaNoteString(t *testing.T) {
+	catalog := testCatalog(t)
+	op, _ := catalog.Operation("singularity_tasks", "create")
+
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Write([]byte(`{"id":"T-1"}`))
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	_, err := client.Call(context.Background(), op, map[string]any{
+		"body": map[string]any{
+			"title": "Task",
+			"note":  `{"ops":[{"insert":"Line one\n"},{"insert":"Line two"}]}`,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["note"] != "Line one\nLine two" {
+		t.Fatalf("note = %#v", got["note"])
+	}
+}
+
+func TestClientRejectsConflictingNoteInputs(t *testing.T) {
+	catalog := testCatalog(t)
+	op, _ := catalog.Operation("singularity_projects", "update")
+
+	client := testClient(t, "https://api.example")
+	_, err := client.Call(context.Background(), op, map[string]any{
+		"id": "P-1",
+		"body": map[string]any{
+			"note":     "raw",
+			"noteText": "plain",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "body.note and body.noteText") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestClientPathQueryAnd204(t *testing.T) {
 	catalog := testCatalog(t)
 	op, _ := catalog.Operation("singularity_projects", "delete")

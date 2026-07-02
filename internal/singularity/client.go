@@ -61,11 +61,15 @@ func (c *APIClient) Call(ctx context.Context, op *Operation, args map[string]any
 	if args == nil {
 		args = map[string]any{}
 	}
+	normalizedArgs, err := normalizeArgs(op, args)
+	if err != nil {
+		return nil, err
+	}
+	args = normalizedArgs
 	if err := validateArgs(op, args); err != nil {
 		return nil, err
 	}
 	var raw []byte
-	var err error
 	if op.Name == "inbox" || (op.Name == "list" && truthy(args["all"])) {
 		raw, err = c.callAllPages(ctx, op, args)
 	} else {
@@ -195,6 +199,82 @@ func compactEntity(item map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+func normalizeArgs(op *Operation, args map[string]any) (map[string]any, error) {
+	if !isNoteBodyOperation(op) {
+		return args, nil
+	}
+	body, ok := args["body"].(map[string]any)
+	if !ok {
+		return args, nil
+	}
+
+	normalizedBody, err := normalizeNoteBody(body)
+	if err != nil {
+		return nil, err
+	}
+	normalizedArgs := cloneArgs(args)
+	normalizedArgs["body"] = normalizedBody
+	return normalizedArgs, nil
+}
+
+func isNoteBodyOperation(op *Operation) bool {
+	if op == nil || (op.Tag != "task" && op.Tag != "project") {
+		return false
+	}
+	return op.Name == "create" || op.Name == "update"
+}
+
+func normalizeNoteBody(body map[string]any) (map[string]any, error) {
+	normalized := make(map[string]any, len(body))
+	for key, value := range body {
+		normalized[key] = value
+	}
+
+	noteText, hasNoteText := normalized["noteText"]
+	note, hasNote := normalized["note"]
+	if hasNoteText && hasNote {
+		return nil, NewValidationError("body.note and body.noteText cannot both be provided")
+	}
+	if hasNoteText {
+		text, ok := stringArg(noteText)
+		if !ok {
+			return nil, NewValidationError("body.noteText must be a string")
+		}
+		normalized["note"] = text
+		delete(normalized, "noteText")
+		return normalized, nil
+	}
+	if noteText, ok := stringArg(note); ok {
+		if plain, ok := noteTextFromDeltaJSON(noteText); ok {
+			normalized["note"] = plain
+		}
+	}
+	return normalized, nil
+}
+
+func noteTextFromDeltaJSON(value string) (string, bool) {
+	var delta struct {
+		Ops []map[string]any `json:"ops"`
+	}
+	if err := json.Unmarshal([]byte(value), &delta); err != nil || len(delta.Ops) == 0 {
+		return "", false
+	}
+
+	var out strings.Builder
+	for _, op := range delta.Ops {
+		insert, ok := op["insert"]
+		if !ok {
+			return "", false
+		}
+		text, ok := insert.(string)
+		if !ok {
+			return "", false
+		}
+		out.WriteString(text)
+	}
+	return out.String(), true
 }
 
 func (c *APIClient) callOnce(ctx context.Context, op *Operation, args map[string]any, overrideQuery url.Values) ([]byte, error) {
