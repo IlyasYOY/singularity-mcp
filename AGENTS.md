@@ -12,13 +12,13 @@ their packages as `*_test.go`.
 
 ## Build, Test, and Development Commands
 
-- `go generate ./...`: regenerates OpenAPI-derived code from the checked-in
-  schema and `openapi/oapi-codegen.yaml`.
-- `go test ./...`: runs unit, integration-style in-process MCP tests, and the
-  stdio smoke tests. Live tests are skipped unless explicitly enabled.
-- `go vet ./...`: runs Go static checks.
-- `go run ./cmd/singularity-mcp -version`: verifies the command starts and
-  prints its version.
+- `make check`: default CI command; runs tests, then vet.
+- `make test`: runs unit, integration-style in-process MCP tests, and the stdio
+  smoke tests. Live tests are skipped unless explicitly enabled.
+- `make vet`: runs Go static checks.
+- `make generate`: regenerates OpenAPI-derived code from the checked-in schema
+  and `openapi/oapi-codegen.yaml`.
+- `make version`: verifies the command starts and prints its version.
 - `go run ./cmd/singularity-mcp -token "$SINGULARITY_TOKEN"`: runs the server
   locally over stdio.
 

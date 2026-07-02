@@ -1,0 +1,20 @@
+image: golang:1.26.4
+
+variables:
+  GOMODCACHE: "$CI_PROJECT_DIR/.cache/go/pkg/mod"
+  GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cache/go/pkg/mod/
+    - .cache/go-build/
+
+stages:
+  - check
+
+check:
+  stage: check
+  script:
+    - go version
+    - make check

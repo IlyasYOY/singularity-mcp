@@ -38,8 +38,9 @@ Kanban operations are intentionally omitted.
 ## Generate And Test
 
 ```bash
-go generate ./...
-go test ./...
-go vet ./...
-go run ./cmd/singularity-mcp -version
+make check
+make test
+make vet
+make generate
+make version
 ```
