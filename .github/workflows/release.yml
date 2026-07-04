@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release type
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ensure default branch
+        if: ${{ github.ref_name != github.event.repository.default_branch }}
+        run: |
+          echo "Releases must run from ${{ github.event.repository.default_branch }}." >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags origin
+
+          latest_tag="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          current_versions="$(sed -nE 's/^const version = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' cmd/singularity-mcp/main.go)"
+          current_version_count="$(printf '%s\n' "$current_versions" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+          if [ "$current_version_count" != "1" ]; then
+            echo "Expected exactly one const version declaration in cmd/singularity-mcp/main.go." >&2
+            exit 1
+          fi
+
+          current_version="$current_versions"
+          if [ -n "$latest_tag" ]; then
+            latest_version="${latest_tag#v}"
+            if [ "$current_version" != "$latest_version" ]; then
+              echo "Current CLI version ($current_version) does not match latest tag ($latest_tag)." >&2
+              exit 1
+            fi
+
+            if [ "$(git rev-list "${latest_tag}..HEAD" --count)" = "0" ]; then
+              echo "No commits found after $latest_tag; refusing to create an empty release." >&2
+              exit 1
+            fi
+          else
+            latest_version="0.0.0"
+          fi
+
+          IFS=. read -r major minor patch <<< "$latest_version"
+
+          case "${{ inputs.bump }}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+            *)
+              echo "Unknown release type: ${{ inputs.bump }}" >&2
+              exit 1
+              ;;
+          esac
+
+          next_version="${major}.${minor}.${patch}"
+          next_tag="v${next_version}"
+
+          if git rev-parse "$next_tag" >/dev/null 2>&1; then
+            echo "Tag $next_tag already exists." >&2
+            exit 1
+          fi
+
+          {
+            echo "version=$next_version"
+            echo "tag=$next_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bump CLI version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_version="$(sed -nE 's/^const version = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' cmd/singularity-mcp/main.go)"
+          perl -0pi -e "s/^const version = \"\Q$current_version\E\"$/const version = \"${{ steps.version.outputs.version }}\"/m" cmd/singularity-mcp/main.go
+          gofmt -w cmd/singularity-mcp/main.go
+
+      - name: Check
+        run: make check
+
+      - name: Verify release diff
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$(git diff --name-only)" != "cmd/singularity-mcp/main.go" ]; then
+            echo "Unexpected tracked changes after release checks:" >&2
+            git diff --name-only >&2
+            exit 1
+          fi
+
+      - name: Verify version command
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          got="$(go run ./cmd/singularity-mcp -version)"
+          want="singularity-mcp ${{ steps.version.outputs.version }}"
+          if [ "$got" != "$want" ]; then
+            echo "Expected '$want', got '$got'." >&2
+            exit 1
+          fi
+
+      - name: Commit and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cmd/singularity-mcp/main.go
+          git commit -m "chore: release ${{ steps.version.outputs.tag }}"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "${{ steps.version.outputs.tag }}"
+          git push origin "HEAD:${GITHUB_REF_NAME}" "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --verify-tag \
+            --generate-notes \
+            --fail-on-no-commits

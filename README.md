@@ -16,6 +16,15 @@ Install the current local checkout:
 make install
 ```
 
+## Release
+
+Releases are created manually from GitHub Actions:
+
+1. Open Actions, then run the `Release` workflow from `main`.
+2. Choose `patch`, `minor`, or `major`.
+3. The workflow bumps the CLI version, commits `chore: release vX.Y.Z`,
+   creates the annotated tag, and publishes the GitHub Release.
+
 ## Run
 
 ```bash
