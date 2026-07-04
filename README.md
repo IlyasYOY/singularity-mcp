@@ -51,15 +51,16 @@ Task date helpers are computed in the MCP client layer:
 
 ## Generate And Test
 
-`make check` applies Go fixers before running vet and tests. `make coverage`
-uses cross-package instrumentation so integration tests count covered code in
-other packages.
+`make check` applies Go fixers, runs vet, and enforces 80% coverage for
+handwritten code. `make coverage` uses cross-package instrumentation so
+integration tests count covered code in other packages.
 
 ```bash
 make check
 make fix
 make test
 make coverage
+make coverage-check
 make vet
 make generate
 make install
