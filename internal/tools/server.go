@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/IlyasYOY/singularity-mcp/internal/singularity"
@@ -25,7 +27,7 @@ type Options struct {
 }
 
 func NewServer(client *singularity.APIClient, catalog *singularity.Catalog, version string) *server.MCPServer {
-	return NewServerWithOptions(client, catalog, version, Options{})
+	return NewServerWithOptions(client, catalog, version, Options{RequireWriteApproval: true})
 }
 
 // NewServerWithOptions creates a Singularity MCP server with optional safeguards.
@@ -84,7 +86,7 @@ func (b Builder) handleTool(ctx context.Context, group *singularity.ToolGroup, r
 	if !ok {
 		return mcp.NewToolResultError(singularity.StructuredError(singularity.NewValidationError("invalid operation: " + operationName))), nil
 	}
-	if approvalResult, proceed := b.requireWriteApproval(ctx, group.ToolName, operationName, args); !proceed {
+	if approvalResult, proceed := b.requireWriteApproval(ctx, group.ToolName, op, args); !proceed {
 		return approvalResult, nil
 	}
 	raw, err := b.Client.Call(ctx, op, args)
@@ -94,8 +96,8 @@ func (b Builder) handleTool(ctx context.Context, group *singularity.ToolGroup, r
 	return mcp.NewToolResultText(string(raw)), nil
 }
 
-func (b Builder) requireWriteApproval(ctx context.Context, toolName, operationName string, args map[string]any) (*mcp.CallToolResult, bool) {
-	if !b.RequireWriteApproval || isReadOperation(operationName) {
+func (b Builder) requireWriteApproval(ctx context.Context, toolName string, op *singularity.Operation, args map[string]any) (*mcp.CallToolResult, bool) {
+	if !b.RequireWriteApproval || !operationRequiresApproval(op) {
 		return nil, true
 	}
 
@@ -106,10 +108,13 @@ func (b Builder) requireWriteApproval(ctx context.Context, toolName, operationNa
 	if mcpServer == nil {
 		return mcp.NewToolResultError("write operation blocked: approval session unavailable"), false
 	}
+	if !clientSupportsElicitation(ctx) {
+		return mcp.NewToolResultError("write operation blocked: client does not support elicitation"), false
+	}
 
 	result, err := mcpServer.RequestElicitation(ctx, mcp.ElicitationRequest{
 		Params: mcp.ElicitationParams{
-			Message: approvalMessage(toolName, operationName, args),
+			Message: approvalMessage(toolName, op, args),
 			RequestedSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -131,6 +136,22 @@ func (b Builder) requireWriteApproval(ctx context.Context, toolName, operationNa
 	return nil, true
 }
 
+func clientSupportsElicitation(ctx context.Context) bool {
+	session := server.ClientSessionFromContext(ctx)
+	if session == nil {
+		return false
+	}
+	if _, ok := session.(server.SessionWithElicitation); !ok {
+		return false
+	}
+	withInfo, ok := session.(server.SessionWithClientInfo)
+	if !ok {
+		return false
+	}
+	capabilities := withInfo.GetClientCapabilities()
+	return capabilities.Elicitation != nil
+}
+
 func approvalAccepted(content any) bool {
 	fields, ok := content.(map[string]any)
 	if !ok {
@@ -140,28 +161,72 @@ func approvalAccepted(content any) bool {
 	return ok && approved
 }
 
-func isReadOperation(operationName string) bool {
-	switch operationName {
-	case "list", "get", "inbox", "overdue", "today", "only-today":
-		return true
-	default:
-		return false
-	}
+func operationRequiresApproval(op *singularity.Operation) bool {
+	return op == nil || op.Method != http.MethodGet
 }
 
-func approvalMessage(toolName, operationName string, args map[string]any) string {
+const approvalPreviewLimit = 500
+
+func approvalMessage(toolName string, op *singularity.Operation, args map[string]any) string {
+	operationName := ""
+	method := ""
+	path := ""
+	if op != nil {
+		operationName = op.Name
+		method = op.Method
+		path = op.Path
+	}
 	parts := []string{
 		"Approve Singularity write operation?",
 		"tool=" + toolName,
 		"operation=" + operationName,
+		"method=" + method,
+		"path=" + path,
 	}
 	if id, ok := args["id"].(string); ok && id != "" {
 		parts = append(parts, "id="+id)
 	}
-	if _, ok := args["body"]; ok {
-		parts = append(parts, "body=present")
+	if preview := approvalArgsPreview(args); preview != "" {
+		parts = append(parts, "args="+preview)
+	}
+	if body, ok := args["body"]; ok {
+		parts = append(parts, "body="+boundedPreview(body, approvalPreviewLimit))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func approvalArgsPreview(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		switch key {
+		case "operation", "body", "confirm":
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	preview := make(map[string]any, len(keys))
+	for _, key := range keys {
+		preview[key] = args[key]
+	}
+	return boundedPreview(preview, approvalPreviewLimit)
+}
+
+func boundedPreview(value any, limit int) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		raw = fmt.Append(nil, value)
+	}
+	if len(raw) <= limit {
+		return string(raw)
+	}
+	return string(raw[:limit]) + "…"
 }
 
 func (b Builder) readResource(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
@@ -174,7 +239,7 @@ func (b Builder) readResource(ctx context.Context, req mcp.ReadResourceRequest) 
 			Text:     string(openapi.Snapshot),
 		}}, nil
 	case "singularity://capabilities":
-		raw, err := json.Marshal(capabilities(b.Catalog))
+		raw, err := json.Marshal(capabilities(b.Catalog, b.RequireWriteApproval))
 		if err != nil {
 			return nil, err
 		}
@@ -292,7 +357,7 @@ func decorateNoteBodySchema(op *singularity.Operation, body map[string]any) {
 	}
 }
 
-func capabilities(catalog *singularity.Catalog) map[string]any {
+func capabilities(catalog *singularity.Catalog, requireWriteApproval bool) map[string]any {
 	tools := make([]map[string]any, 0, len(catalog.Groups))
 	for _, group := range catalog.Groups {
 		tools = append(tools, map[string]any{
@@ -301,9 +366,10 @@ func capabilities(catalog *singularity.Catalog) map[string]any {
 		})
 	}
 	return map[string]any{
-		"tools":        tools,
-		"omittedTags":  catalog.OmittedTags,
-		"operationSet": map[string]any{"totalSwagger": catalog.TotalOperations, "exposed": catalog.ExposedOperationCount()},
+		"tools":                tools,
+		"omittedTags":          catalog.OmittedTags,
+		"operationSet":         map[string]any{"totalSwagger": catalog.TotalOperations, "exposed": catalog.ExposedOperationCount()},
+		"requireWriteApproval": requireWriteApproval,
 	}
 }
 

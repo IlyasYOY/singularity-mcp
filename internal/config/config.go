@@ -39,13 +39,13 @@ func Parse(args []string, getenv Getter) (Result, error) {
 		Token:                getenv("SINGULARITY_TOKEN"),
 		BaseURL:              valueOrDefault(getenv("SINGULARITY_BASE_URL"), DefaultBaseURL),
 		Timeout:              DefaultTimeout,
-		RequireWriteApproval: false,
+		RequireWriteApproval: true,
 	}
 	if raw := getenv("SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL"); raw != "" {
 		requireWriteApproval, err := strconv.ParseBool(raw)
 		if err != nil {
 			if versionRequested {
-				requireWriteApproval = false
+				requireWriteApproval = cfg.RequireWriteApproval
 			} else {
 				return Result{}, fmt.Errorf("parse SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL: %w", err)
 			}

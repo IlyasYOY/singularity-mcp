@@ -16,7 +16,7 @@ func TestParsePrecedence(t *testing.T) {
 		"-token", "cli-token",
 		"-base-url", "https://cli.example",
 		"-timeout", "5s",
-		"-require-write-approval",
+		"-require-write-approval=true",
 	}, func(key string) string { return env[key] })
 	if err != nil {
 		t.Fatal(err)
@@ -35,10 +35,25 @@ func TestParsePrecedence(t *testing.T) {
 	}
 }
 
-func TestParseRequireWriteApprovalFromEnv(t *testing.T) {
+func TestParseRequireWriteApprovalFromEnvFalse(t *testing.T) {
 	got, err := Parse(nil, func(key string) string {
 		if key == "SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL" {
-			return "true"
+			return "false"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config.RequireWriteApproval {
+		t.Fatal("RequireWriteApproval = true")
+	}
+}
+
+func TestParseRequireWriteApprovalCLIOverridesEnv(t *testing.T) {
+	got, err := Parse([]string{"-require-write-approval=true"}, func(key string) string {
+		if key == "SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL" {
+			return "false"
 		}
 		return ""
 	})
@@ -61,6 +76,9 @@ func TestParseDefaultsWithoutToken(t *testing.T) {
 	if got.Config.Timeout != DefaultTimeout {
 		t.Fatalf("timeout = %s", got.Config.Timeout)
 	}
+	if !got.Config.RequireWriteApproval {
+		t.Fatal("RequireWriteApproval = false")
+	}
 
 	got, err = Parse(nil, func(string) string { return "" })
 	if err != nil {
@@ -68,6 +86,9 @@ func TestParseDefaultsWithoutToken(t *testing.T) {
 	}
 	if got.Config.Token != "" {
 		t.Fatalf("token = %q", got.Config.Token)
+	}
+	if !got.Config.RequireWriteApproval {
+		t.Fatal("RequireWriteApproval = false")
 	}
 }
 
@@ -85,6 +106,21 @@ func TestParseVersionIgnoresBadEnvTimeout(t *testing.T) {
 	got, err := Parse([]string{"-version"}, func(key string) string {
 		if key == "SINGULARITY_TIMEOUT" {
 			return "nope"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.VersionOnly {
+		t.Fatal("VersionOnly = false")
+	}
+}
+
+func TestParseVersionIgnoresBadApprovalEnv(t *testing.T) {
+	got, err := Parse([]string{"-version"}, func(key string) string {
+		if key == "SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL" {
+			return "sometimes"
 		}
 		return ""
 	})

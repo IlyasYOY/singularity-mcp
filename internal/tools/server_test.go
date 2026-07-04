@@ -88,6 +88,9 @@ func TestToolSchemasAndResources(t *testing.T) {
 	if !strings.Contains(text, `"exposed":45`) || !strings.Contains(text, "kanban-status") {
 		t.Fatalf("capabilities = %s", text)
 	}
+	if !strings.Contains(text, `"requireWriteApproval":true`) {
+		t.Fatalf("capabilities missing write approval policy: %s", text)
+	}
 }
 
 func TestToolCallEveryOperation(t *testing.T) {
@@ -105,7 +108,7 @@ func TestToolCallEveryOperation(t *testing.T) {
 	}))
 	defer api.Close()
 
-	srv := NewServer(testClient(t, api.URL), catalog, "test")
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: false})
 	c, err := client.NewInProcessClient(srv)
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +217,59 @@ func TestRequireWriteApprovalAllowsReadsWithoutElicitation(t *testing.T) {
 	}
 }
 
-func TestRequireWriteApprovalBlocksDeclinedWritesBeforeAPICall(t *testing.T) {
+func TestRequireWriteApprovalBlocksUnapprovedWritesBeforeAPICall(t *testing.T) {
+	tests := []struct {
+		name     string
+		action   mcp.ElicitationResponseAction
+		approved bool
+	}{
+		{name: "decline", action: mcp.ElicitationResponseActionDecline},
+		{name: "cancel", action: mcp.ElicitationResponseActionCancel},
+		{name: "approved false", action: mcp.ElicitationResponseActionAccept, approved: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			catalog := testCatalog(t)
+			var httpCalls int
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				httpCalls++
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer api.Close()
+
+			srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
+			handler := &testElicitationHandler{action: tt.action, approved: tt.approved}
+			c := newInProcessClientWithElicitation(t, srv, handler)
+			defer c.Close()
+			startClient(t, c)
+
+			req := mcp.CallToolRequest{}
+			req.Params.Name = "singularity_projects"
+			req.Params.Arguments = map[string]any{"operation": "delete", "id": "id-1", "confirm": true}
+			result, err := c.CallTool(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.IsError || !strings.Contains(resultText(result), "write operation blocked") {
+				t.Fatalf("expected approval error, got: %s", resultText(result))
+			}
+			if handler.calls != 1 {
+				t.Fatalf("elicitation calls = %d", handler.calls)
+			}
+			message := handler.last.Params.Message
+			for _, want := range []string{"tool=singularity_projects", "operation=delete", "method=DELETE", "path=/v2/project/{id}", "id=id-1"} {
+				if !strings.Contains(message, want) {
+					t.Fatalf("approval message missing %q: %q", want, message)
+				}
+			}
+			if httpCalls != 0 {
+				t.Fatalf("http calls = %d", httpCalls)
+			}
+		})
+	}
+}
+
+func TestRequireWriteApprovalFailsClosedWithoutClientElicitationSupport(t *testing.T) {
 	catalog := testCatalog(t)
 	var httpCalls int
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -224,8 +279,10 @@ func TestRequireWriteApprovalBlocksDeclinedWritesBeforeAPICall(t *testing.T) {
 	defer api.Close()
 
 	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
-	handler := &testElicitationHandler{action: mcp.ElicitationResponseActionDecline}
-	c := newInProcessClientWithElicitation(t, srv, handler)
+	c, err := client.NewInProcessClient(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer c.Close()
 	startClient(t, c)
 
@@ -236,14 +293,8 @@ func TestRequireWriteApprovalBlocksDeclinedWritesBeforeAPICall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.IsError || !strings.Contains(resultText(result), "write operation blocked") {
-		t.Fatalf("expected approval error, got: %s", resultText(result))
-	}
-	if handler.calls != 1 {
-		t.Fatalf("elicitation calls = %d", handler.calls)
-	}
-	if !strings.Contains(handler.last.Params.Message, "tool=singularity_projects") || !strings.Contains(handler.last.Params.Message, "operation=delete") || !strings.Contains(handler.last.Params.Message, "id=id-1") {
-		t.Fatalf("approval message = %q", handler.last.Params.Message)
+	if !result.IsError || !strings.Contains(resultText(result), "write operation blocked") || !strings.Contains(resultText(result), "elicitation") {
+		t.Fatalf("expected elicitation support error, got: %s", resultText(result))
 	}
 	if httpCalls != 0 {
 		t.Fatalf("http calls = %d", httpCalls)
@@ -268,7 +319,7 @@ func TestRequireWriteApprovalAllowsApprovedWrites(t *testing.T) {
 
 	req := mcp.CallToolRequest{}
 	req.Params.Name = "singularity_projects"
-	req.Params.Arguments = map[string]any{"operation": "create", "body": map[string]any{"title": "new"}}
+	req.Params.Arguments = map[string]any{"operation": "create", "maxCount": float64(1), "body": map[string]any{"title": "new"}}
 	result, err := c.CallTool(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -279,8 +330,80 @@ func TestRequireWriteApprovalAllowsApprovedWrites(t *testing.T) {
 	if handler.calls != 1 {
 		t.Fatalf("elicitation calls = %d", handler.calls)
 	}
+	message := handler.last.Params.Message
+	for _, want := range []string{"tool=singularity_projects", "operation=create", "method=POST", "path=/v2/project", "args=", "maxCount", "body="} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("approval message missing %q: %q", want, message)
+		}
+	}
 	if httpCalls != 1 {
 		t.Fatalf("http calls = %d", httpCalls)
+	}
+}
+
+func TestRequireWriteApprovalDisabledAllowsWritesWithoutElicitation(t *testing.T) {
+	catalog := testCatalog(t)
+	var httpCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"created"}`))
+	}))
+	defer api.Close()
+
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: false})
+	handler := &testElicitationHandler{action: mcp.ElicitationResponseActionDecline}
+	c := newInProcessClientWithElicitation(t, srv, handler)
+	defer c.Close()
+	startClient(t, c)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "singularity_projects"
+	req.Params.Arguments = map[string]any{"operation": "create", "body": map[string]any{"title": "new"}}
+	result, err := c.CallTool(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("tool error: %s", resultText(result))
+	}
+	if handler.calls != 0 {
+		t.Fatalf("elicitation calls = %d", handler.calls)
+	}
+	if httpCalls != 1 {
+		t.Fatalf("http calls = %d", httpCalls)
+	}
+}
+
+func TestOperationRequiresApprovalByHTTPMethod(t *testing.T) {
+	if operationRequiresApproval(&singularity.Operation{Method: http.MethodGet}) {
+		t.Fatal("GET operation requires approval")
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodDelete} {
+		if !operationRequiresApproval(&singularity.Operation{Method: method}) {
+			t.Fatalf("%s operation does not require approval", method)
+		}
+	}
+}
+
+func TestApprovalMessageBoundsBodyPreview(t *testing.T) {
+	longValue := strings.Repeat("x", approvalPreviewLimit*2)
+	message := approvalMessage("singularity_projects", &singularity.Operation{
+		Name:   "create",
+		Method: http.MethodPost,
+		Path:   "/v2/project",
+	}, map[string]any{
+		"operation": "create",
+		"body":      map[string]any{"title": longValue},
+	})
+	if !strings.Contains(message, "body=") || !strings.Contains(message, "…") {
+		t.Fatalf("message missing bounded body preview: %q", message)
+	}
+	if strings.Contains(message, longValue) {
+		t.Fatal("message contains unbounded body value")
+	}
+	if len(message) >= 2000 {
+		t.Fatalf("message too long: %d", len(message))
 	}
 }
 
@@ -303,7 +426,10 @@ func (h *testElicitationHandler) Elicit(ctx context.Context, request mcp.Elicita
 
 func newInProcessClientWithElicitation(t *testing.T, srv *server.MCPServer, handler *testElicitationHandler) *client.Client {
 	t.Helper()
-	return client.NewClient(transport.NewInProcessTransportWithOptions(srv, transport.WithElicitationHandler(handler)))
+	return client.NewClient(
+		transport.NewInProcessTransportWithOptions(srv, transport.WithElicitationHandler(handler)),
+		client.WithElicitationHandler(handler),
+	)
 }
 
 func testCatalog(t *testing.T) *singularity.Catalog {

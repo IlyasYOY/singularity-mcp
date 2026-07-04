@@ -36,13 +36,16 @@ Config precedence is CLI flag, then environment, then default:
 - `-token` / `SINGULARITY_TOKEN` required for API calls
 - `-base-url` / `SINGULARITY_BASE_URL`, default `https://api.singularity-app.com`
 - `-timeout` / `SINGULARITY_TIMEOUT`, default `30s`
-- `-require-write-approval` / `SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL`, default `false`
+- `-require-write-approval` / `SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL`, default `true`
 
 When write approval is enabled, read-only operations run normally, while write
 operations request MCP elicitation approval before the Singularity API call is
 made. Read-only operations are `list`, `get`, `inbox`, `overdue`, `today`, and
 `only-today`; all other operations, including `create`, `update`, `delete`, and
 `delete_bulk`, require approval.
+Set `-require-write-approval=false` or
+`SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL=false` only for trusted clients or
+environments where write prompts are intentionally disabled.
 
 ## Tools
 
