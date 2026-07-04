@@ -11,7 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const version = "0.1.1"
+const version = "0.2.0"
 
 func main() {
 	result, err := config.Parse(os.Args[1:], os.Getenv)
