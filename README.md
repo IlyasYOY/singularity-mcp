@@ -51,13 +51,13 @@ environments where write prompts are intentionally disabled.
 
 The server exposes 8 merged tools with an `operation` enum:
 
-- `singularity_projects`: `list`, `get`, `create`, `update`, `delete`
+- `singularity_projects`: `list`, `search`, `get`, `create`, `update`, `delete`
 - `singularity_task_groups`: `list`, `get`, `create`, `update`, `delete`
-- `singularity_tasks`: `list`, `inbox`, `overdue`, `today`, `only-today`, `get`, `create`, `update`, `delete`
+- `singularity_tasks`: `list`, `inbox`, `overdue`, `today`, `only-today`, `search`, `get`, `create`, `update`, `delete`
 - `singularity_habits`: `list`, `get`, `create`, `update`, `delete`
 - `singularity_habit_progress`: `list`, `get`, `create`, `update`, `delete`
 - `singularity_checklist_items`: `list`, `get`, `create`, `update`, `delete`
-- `singularity_tags`: `list`, `get`, `create`, `update`, `delete`
+- `singularity_tags`: `list`, `search`, `get`, `create`, `update`, `delete`
 - `singularity_time_stats`: `list`, `get`, `create`, `update`, `delete`, `delete_bulk`
 
 Kanban operations are intentionally omitted.
@@ -67,6 +67,24 @@ Task date helpers are computed in the MCP client layer:
 - `overdue`: active tasks with `start` before today
 - `today`: active tasks with `start` today or earlier
 - `only-today`: active tasks with `start` today only
+
+Search helpers are computed in the MCP client layer for tasks, projects, and
+tags. They fetch list pages from the Singularity API, filter locally, and
+return compact bounded results by default. Search uses case-insensitive
+substring matching over `title` unless `fields` is provided.
+
+Examples:
+
+```json
+{"operation":"search","query":"mcp","fields":["title"],"limit":10}
+```
+
+```json
+{"operation":"search","projectId":"P-...","tag":"TG-...","query":"review"}
+```
+
+By default, search fetches all pages with `maxCount=1000`; pass `all=false` to
+search only the first API page.
 
 ## Generate And Test
 

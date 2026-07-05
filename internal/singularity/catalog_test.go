@@ -14,7 +14,7 @@ func TestCatalogCoverage(t *testing.T) {
 	if catalog.TotalOperations != 51 {
 		t.Fatalf("total ops = %d", catalog.TotalOperations)
 	}
-	if catalog.ExposedOperationCount() != 45 {
+	if catalog.ExposedOperationCount() != 48 {
 		t.Fatalf("exposed ops = %d", catalog.ExposedOperationCount())
 	}
 	if len(catalog.Groups) != 8 {
@@ -31,6 +31,16 @@ func TestCatalogCoverage(t *testing.T) {
 	}
 	if _, ok := catalog.Group("singularity_kanban_statuses"); ok {
 		t.Fatal("kanban group exposed")
+	}
+	for _, tool := range []string{"singularity_tasks", "singularity_projects", "singularity_tags"} {
+		search, ok := catalog.Operation(tool, "search")
+		if !ok {
+			t.Fatalf("%s search op missing", tool)
+		}
+		list, _ := catalog.Operation(tool, "list")
+		if search.Method != list.Method || search.Path != list.Path || search.ListResponseField != list.ListResponseField {
+			t.Fatalf("%s search = %#v, list = %#v", tool, search, list)
+		}
 	}
 }
 

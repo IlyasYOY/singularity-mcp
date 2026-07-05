@@ -37,11 +37,12 @@ var operationOrder = map[string]int{
 	"overdue":     2,
 	"today":       3,
 	"only-today":  4,
-	"get":         5,
-	"create":      6,
-	"update":      7,
-	"delete":      8,
-	"delete_bulk": 9,
+	"search":      5,
+	"get":         6,
+	"create":      7,
+	"update":      8,
+	"delete":      9,
+	"delete_bulk": 10,
 }
 
 type Catalog struct {
@@ -172,6 +173,7 @@ func NewCatalog(snapshot []byte) (*Catalog, error) {
 	}
 	sort.Strings(catalog.OmittedTags)
 	catalog.addSyntheticOperations()
+	catalog.addSyntheticSearchOperations()
 	catalog.sortGroupsAndOperations()
 	return catalog, nil
 }
@@ -216,6 +218,40 @@ func (c *Catalog) addSyntheticOperations() {
 	for _, spec := range specs {
 		op := &Operation{
 			Name:              spec.name,
+			Method:            listOp.Method,
+			Path:              listOp.Path,
+			OperationID:       spec.operationID,
+			Summary:           spec.summary,
+			Tag:               listOp.Tag,
+			QueryParams:       append([]Parameter(nil), listOp.QueryParams...),
+			ListResponseField: listOp.ListResponseField,
+		}
+		group.Operations = append(group.Operations, op)
+		c.operationsByKey[operationKey(group.ToolName, op.Name)] = op
+	}
+}
+
+func (c *Catalog) addSyntheticSearchOperations() {
+	specs := []struct {
+		toolName    string
+		operationID string
+		summary     string
+	}{
+		{"singularity_tasks", "TaskControllerSearch", "Search tasks"},
+		{"singularity_projects", "ProjectControllerSearch", "Search projects"},
+		{"singularity_tags", "TagControllerSearch", "Search tags"},
+	}
+	for _, spec := range specs {
+		group, ok := c.groupsByTool[spec.toolName]
+		if !ok {
+			continue
+		}
+		listOp, ok := c.operationsByKey[operationKey(spec.toolName, "list")]
+		if !ok {
+			continue
+		}
+		op := &Operation{
+			Name:              "search",
 			Method:            listOp.Method,
 			Path:              listOp.Path,
 			OperationID:       spec.operationID,

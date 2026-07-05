@@ -549,6 +549,260 @@ func TestClientTaskDateOperationsSupportCompact(t *testing.T) {
 	}
 }
 
+func TestClientSearchTasksFiltersByTitleAndCompacts(t *testing.T) {
+	catalog := testCatalog(t)
+	op, ok := catalog.Operation("singularity_tasks", "search")
+	if !ok {
+		t.Fatal("task search op missing")
+	}
+
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("offset") {
+		case "0":
+			items := make([]map[string]any, PageSize)
+			for i := range items {
+				items[i] = map[string]any{"id": "T-other", "title": "Other", "modificated": map[string]any{"title": 1}}
+			}
+			items[3] = map[string]any{"id": "T-mcp-1", "title": "MCP search", "projectId": "P-1", "modificated": map[string]any{"title": 1}}
+			json.NewEncoder(w).Encode(map[string]any{"tasks": items})
+		case "1000":
+			json.NewEncoder(w).Encode(map[string]any{"tasks": []map[string]any{
+				{"id": "T-mcp-2", "title": "Improve mcp", "tags": []string{"TG-1"}},
+				{"id": "T-nope", "title": "Nope"},
+			}})
+		default:
+			t.Fatalf("unexpected offset %q", r.URL.Query().Get("offset"))
+		}
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	raw, err := client.Call(context.Background(), op, map[string]any{"query": "mcp", "limit": float64(10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Count int              `json:"count"`
+		Tasks []map[string]any `json:"tasks"`
+		Query map[string]any   `json:"query"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Count != 2 || strings.Join(taskIDs(decoded.Tasks), ",") != "T-mcp-1,T-mcp-2" {
+		t.Fatalf("decoded = %#v", decoded)
+	}
+	if _, ok := decoded.Tasks[0]["modificated"]; ok {
+		t.Fatalf("task was not compacted: %#v", decoded.Tasks[0])
+	}
+	if strings.Join(offsets, ",") != "0,1000" {
+		t.Fatalf("offsets = %v", offsets)
+	}
+	if truncated, _ := decoded.Query["truncated"].(bool); truncated {
+		t.Fatalf("unexpected truncated metadata: %#v", decoded.Query)
+	}
+}
+
+func TestClientSearchTasksForwardsServerFiltersOnly(t *testing.T) {
+	catalog := testCatalog(t)
+	op, _ := catalog.Operation("singularity_tasks", "search")
+
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte(`{"tasks":[]}`))
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	_, err := client.Call(context.Background(), op, map[string]any{
+		"query":                         "mcp",
+		"fields":                        []any{"title", "note"},
+		"limit":                         float64(5),
+		"tagMode":                       "all",
+		"projectId":                     "P-1",
+		"parent":                        "T-parent",
+		"startDateFrom":                 "2026-01-01",
+		"startDateTo":                   "2026-01-31",
+		"includeArchived":               true,
+		"includeAllRecurrenceInstances": false,
+		"all":                           false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"projectId=P-1", "parent=T-parent", "startDateFrom=2026-01-01", "startDateTo=2026-01-31", "includeArchived=true", "includeAllRecurrenceInstances=false"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Fatalf("query %q missing %s", gotQuery, want)
+		}
+	}
+	for _, unwanted := range []string{"query=", "fields=", "limit=", "tagMode=", "all="} {
+		if strings.Contains(gotQuery, unwanted) {
+			t.Fatalf("query %q contains search-only arg %s", gotQuery, unwanted)
+		}
+	}
+}
+
+func TestClientSearchTasksFiltersTagsAnyAll(t *testing.T) {
+	catalog := testCatalog(t)
+	op, _ := catalog.Operation("singularity_tasks", "search")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []map[string]any{
+			{"id": "T-1", "title": "Tagged", "tags": []any{"TG-1", "TG-2"}},
+			{"id": "T-2", "title": "Tagged", "tags": []any{"TG-1"}},
+			{"id": "T-3", "title": "Tagged", "tags": []any{"TG-3"}},
+		}})
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	decodeIDs := func(args map[string]any) string {
+		t.Helper()
+		raw, err := client.Call(context.Background(), op, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			Tasks []map[string]any `json:"tasks"`
+		}
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(taskIDs(decoded.Tasks), ",")
+	}
+	if got := decodeIDs(map[string]any{"query": "tagged", "tags": []any{"TG-2", "TG-3"}, "tagMode": "any"}); got != "T-1,T-3" {
+		t.Fatalf("any IDs = %s", got)
+	}
+	if got := decodeIDs(map[string]any{"query": "tagged", "tags": []any{"TG-1", "TG-2"}, "tagMode": "all"}); got != "T-1" {
+		t.Fatalf("all IDs = %s", got)
+	}
+}
+
+func TestClientSearchProjectsAndTags(t *testing.T) {
+	catalog := testCatalog(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/project":
+			json.NewEncoder(w).Encode(map[string]any{"projects": []map[string]any{
+				{"id": "P-1", "title": "Hermes", "isNotebook": false, "modificated": map[string]any{"title": 1}},
+				{"id": "P-2", "title": "Other", "isNotebook": false},
+			}})
+		case "/v2/tag":
+			json.NewEncoder(w).Encode(map[string]any{"tags": []map[string]any{
+				{"id": "TG-1", "title": "work"},
+				{"id": "TG-2", "title": "home"},
+			}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	projectSearch, _ := catalog.Operation("singularity_projects", "search")
+	raw, err := client.Call(context.Background(), projectSearch, map[string]any{"query": "hermes", "isNotebook": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projects struct {
+		Projects []map[string]any `json:"projects"`
+	}
+	if err := json.Unmarshal(raw, &projects); err != nil {
+		t.Fatal(err)
+	}
+	if len(projects.Projects) != 1 || projects.Projects[0]["id"] != "P-1" {
+		t.Fatalf("projects = %#v", projects.Projects)
+	}
+	if _, ok := projects.Projects[0]["modificated"]; ok {
+		t.Fatalf("project was not compacted: %#v", projects.Projects[0])
+	}
+
+	tagSearch, _ := catalog.Operation("singularity_tags", "search")
+	raw, err = client.Call(context.Background(), tagSearch, map[string]any{"query": "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tags struct {
+		Tags []map[string]any `json:"tags"`
+	}
+	if err := json.Unmarshal(raw, &tags); err != nil {
+		t.Fatal(err)
+	}
+	if len(tags.Tags) != 1 || tags.Tags[0]["id"] != "TG-1" {
+		t.Fatalf("tags = %#v", tags.Tags)
+	}
+}
+
+func TestClientSearchValidation(t *testing.T) {
+	catalog := testCatalog(t)
+	taskSearch, _ := catalog.Operation("singularity_tasks", "search")
+	tagSearch, _ := catalog.Operation("singularity_tags", "search")
+	client := testClient(t, "https://api.example")
+	tests := []struct {
+		name string
+		op   *Operation
+		args map[string]any
+		want string
+	}{
+		{"empty criteria", taskSearch, map[string]any{}, "query or at least one search filter"},
+		{"bad field", taskSearch, map[string]any{"query": "x", "fields": []any{"bad"}}, "unsupported search field"},
+		{"note unsupported for tags", tagSearch, map[string]any{"query": "x", "fields": []any{"note"}}, "unsupported search field"},
+		{"bad tag mode", taskSearch, map[string]any{"query": "x", "tagMode": "nope"}, "tagMode"},
+		{"limit low", taskSearch, map[string]any{"query": "x", "limit": float64(0)}, "limit"},
+		{"limit high", taskSearch, map[string]any{"query": "x", "limit": float64(101)}, "limit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := client.Call(context.Background(), tt.op, tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientSearchAllFalseSinglePage(t *testing.T) {
+	catalog := testCatalog(t)
+	op, _ := catalog.Operation("singularity_tasks", "search")
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		items := make([]map[string]any, PageSize)
+		for i := range items {
+			items[i] = map[string]any{"id": "T-match", "title": "mcp"}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": items})
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	raw, err := client.Call(context.Background(), op, map[string]any{"query": "mcp", "all": false, "limit": float64(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Count int            `json:"count"`
+		Query map[string]any `json:"query"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || decoded.Count != 1 {
+		t.Fatalf("calls=%d decoded=%#v", calls, decoded)
+	}
+	if truncated, _ := decoded.Query["truncated"].(bool); !truncated {
+		t.Fatalf("expected truncated metadata: %#v", decoded.Query)
+	}
+}
+
 func testCatalog(t *testing.T) *Catalog {
 	t.Helper()
 	catalog, err := NewCatalog(openapi.Snapshot)
