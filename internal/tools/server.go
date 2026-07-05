@@ -287,8 +287,48 @@ func toolForGroup(group *singularity.ToolGroup) mcp.Tool {
 			},
 			"compact": map[string]any{
 				"type":        "boolean",
-				"description": "For list operations, return compact entities without large metadata fields.",
+				"description": "For list and search operations, return compact entities without large metadata fields. Search defaults to true.",
 				"default":     false,
+			},
+			"query": map[string]any{
+				"type":        "string",
+				"description": "Search text for operation=search. Uses case-insensitive substring matching.",
+			},
+			"fields": map[string]any{
+				"type":        "array",
+				"description": "Fields to search for operation=search. Defaults to title.",
+				"items": map[string]any{
+					"type": "string",
+					"enum": []string{"id", "title", "note"},
+				},
+			},
+			"limit": map[string]any{
+				"type":        "number",
+				"description": "Maximum number of operation=search results. Defaults to 20, max 100.",
+				"default":     20,
+			},
+			"tag": map[string]any{
+				"type":        "string",
+				"description": "Task operation=search filter: match one tag ID exactly.",
+			},
+			"tags": map[string]any{
+				"type":        "array",
+				"description": "Task operation=search filter: match tag IDs exactly.",
+				"items":       map[string]any{"type": "string"},
+			},
+			"tagMode": map[string]any{
+				"type":        "string",
+				"description": "Task operation=search tag matching mode.",
+				"enum":        []string{"any", "all"},
+				"default":     "any",
+			},
+			"checked": map[string]any{
+				"type":        "number",
+				"description": "Task operation=search filter: checked status.",
+			},
+			"priority": map[string]any{
+				"type":        "number",
+				"description": "Task operation=search filter: priority.",
 			},
 		},
 	}

@@ -49,7 +49,7 @@ func TestToolSchemasAndResources(t *testing.T) {
 		if tool.Name == "singularity_tasks" {
 			raw, _ := json.Marshal(tool.InputSchema)
 			schema := string(raw)
-			for _, want := range []string{"inbox", "overdue", "today", "only-today", "compact"} {
+			for _, want := range []string{"inbox", "overdue", "today", "only-today", "search", "compact", "query", "fields", "limit", "tag", "tags", "tagMode"} {
 				if !strings.Contains(schema, want) {
 					t.Fatalf("task schema missing %s: %s", want, raw)
 				}
@@ -85,7 +85,7 @@ func TestToolSchemasAndResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := read.Contents[0].(mcp.TextResourceContents).Text
-	if !strings.Contains(text, `"exposed":45`) || !strings.Contains(text, "kanban-status") {
+	if !strings.Contains(text, `"exposed":48`) || !strings.Contains(text, "kanban-status") {
 		t.Fatalf("capabilities = %s", text)
 	}
 	if !strings.Contains(text, `"requireWriteApproval":true`) {
@@ -180,6 +180,43 @@ func TestToolValidationAndAPIErrors(t *testing.T) {
 	got := call(map[string]any{"operation": "list"})
 	if !strings.Contains(got, `"status":403`) || strings.Contains(got, "secret-token") {
 		t.Fatalf("api error = %s", got)
+	}
+}
+
+func TestRequireWriteApprovalAllowsSearchWithoutElicitation(t *testing.T) {
+	catalog := testCatalog(t)
+	var httpCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"tasks":[{"id":"T-1","title":"MCP search"}]}`))
+	}))
+	defer api.Close()
+
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
+	handler := &testElicitationHandler{action: mcp.ElicitationResponseActionAccept, approved: true}
+	c := newInProcessClientWithElicitation(t, srv, handler)
+	defer c.Close()
+	startClient(t, c)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "singularity_tasks"
+	req.Params.Arguments = map[string]any{"operation": "search", "query": "mcp", "all": false}
+	result, err := c.CallTool(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("tool error: %s", resultText(result))
+	}
+	if handler.calls != 0 {
+		t.Fatalf("elicitation calls = %d", handler.calls)
+	}
+	if httpCalls != 1 {
+		t.Fatalf("http calls = %d", httpCalls)
+	}
+	if !strings.Contains(resultText(result), `"count":1`) {
+		t.Fatalf("result = %s", resultText(result))
 	}
 }
 
@@ -481,6 +518,8 @@ func argsFor(op *singularity.Operation) map[string]any {
 		args[op.QueryParams[0].Name] = "2026-01-01"
 	case "list":
 		args["maxCount"] = float64(1)
+	case "search":
+		args["query"] = "x"
 	}
 	return args
 }

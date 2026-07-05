@@ -80,6 +80,9 @@ func (c *APIClient) Call(ctx context.Context, op *Operation, args map[string]any
 	if err := validateArgs(op, args); err != nil {
 		return nil, err
 	}
+	if op.Name == "search" {
+		return c.search(ctx, op, args)
+	}
 	var raw []byte
 	today := localDate(c.now())
 	if isTaskDateListOperation(op.Name) {
