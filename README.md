@@ -37,6 +37,7 @@ Config precedence is CLI flag, then environment, then default:
 - `-token` / `SINGULARITY_TOKEN` required for API calls
 - `-base-url` / `SINGULARITY_BASE_URL`, default `https://api.singularity-app.com`
 - `-timeout` / `SINGULARITY_TIMEOUT`, default `30s`
+- `-approval-timeout` / `SINGULARITY_MCP_APPROVAL_TIMEOUT`, default `2m`
 - `-require-write-approval` / `SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL`, default `true`
 - `-version` prints the CLI version and exits
 - `-help` / `-h` prints CLI usage and exits
@@ -46,6 +47,12 @@ operations request MCP elicitation approval before the Singularity API call is
 made. Read-only operations are `list`, `get`, `inbox`, `overdue`, `today`, and
 `only-today`; all other operations, including `create`, `update`, `delete`, and
 `delete_bulk`, require approval.
+Approval requests time out after two minutes by default. A timeout fails closed,
+so the write is blocked without calling the Singularity API. Late approval responses
+are ignored, including responses from handlers that do not honor cancellation. The
+approval timeout applies only to the MCP elicitation wait; API calls continue to use
+`-timeout`. As with all stdio MCP traffic, the client must continue draining server
+stdout for timeout results and other protocol messages to be delivered.
 Set `-require-write-approval=false` or
 `SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL=false` only for trusted clients or
 environments where write prompts are intentionally disabled.
@@ -93,7 +100,8 @@ search only the first API page.
 
 `make check` applies Go fixers, runs vet, and enforces 80% coverage for
 handwritten code. `make coverage` uses cross-package instrumentation so
-integration tests count covered code in other packages.
+integration tests count covered code in other packages. CI uses Go 1.26.5 and
+runs the pinned `govulncheck` v1.6.0 scanner before the full check.
 
 ```bash
 make check

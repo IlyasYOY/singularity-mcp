@@ -3,10 +3,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/IlyasYOY/singularity-mcp/internal/singularity"
 	"github.com/IlyasYOY/singularity-mcp/openapi"
@@ -19,12 +21,19 @@ type Builder struct {
 	Catalog              *singularity.Catalog
 	Server               *server.MCPServer
 	RequireWriteApproval bool
+	ApprovalTimeout      time.Duration
+	// approvalRequestSlots bounds a transport or handler that ignores context
+	// cancellation to one orphaned elicitation request at a time.
+	approvalRequestSlots chan struct{}
 }
 
 // Options configures optional MCP server behavior.
 type Options struct {
 	RequireWriteApproval bool
+	ApprovalTimeout      time.Duration
 }
+
+const defaultApprovalTimeout = 2 * time.Minute
 
 func NewServer(client *singularity.APIClient, catalog *singularity.Catalog, version string) *server.MCPServer {
 	return NewServerWithOptions(client, catalog, version, Options{RequireWriteApproval: true})
@@ -45,7 +54,14 @@ func NewServerWithOptions(client *singularity.APIClient, catalog *singularity.Ca
 		version,
 		serverOptions...,
 	)
-	builder := Builder{Client: client, Catalog: catalog, Server: mcpServer, RequireWriteApproval: options.RequireWriteApproval}
+	builder := Builder{
+		Client:               client,
+		Catalog:              catalog,
+		Server:               mcpServer,
+		RequireWriteApproval: options.RequireWriteApproval,
+		ApprovalTimeout:      approvalTimeoutOrDefault(options.ApprovalTimeout),
+		approvalRequestSlots: make(chan struct{}, 1),
+	}
 	builder.Register(mcpServer)
 	return mcpServer
 }
@@ -112,7 +128,8 @@ func (b Builder) requireWriteApproval(ctx context.Context, toolName string, op *
 		return mcp.NewToolResultError("write operation blocked: client does not support elicitation"), false
 	}
 
-	result, err := mcpServer.RequestElicitation(ctx, mcp.ElicitationRequest{
+	approvalCtx, cancel := context.WithTimeout(ctx, approvalTimeoutOrDefault(b.ApprovalTimeout))
+	result, err := b.requestElicitation(approvalCtx, mcpServer, mcp.ElicitationRequest{
 		Params: mcp.ElicitationParams{
 			Message: approvalMessage(toolName, op, args),
 			RequestedSchema: map[string]any{
@@ -127,13 +144,70 @@ func (b Builder) requireWriteApproval(ctx context.Context, toolName string, op *
 			},
 		},
 	})
+	approvalErr := approvalCtx.Err()
+	cancel()
+	if errors.Is(approvalErr, context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return mcp.NewToolResultError("write operation blocked: approval request timed out"), false
+	}
+	if approvalErr != nil {
+		return mcp.NewToolResultError("write operation blocked: approval request failed: " + approvalErr.Error()), false
+	}
 	if err != nil {
 		return mcp.NewToolResultError("write operation blocked: approval request failed: " + err.Error()), false
+	}
+	if result == nil {
+		return mcp.NewToolResultError("write operation blocked: approval request returned no result"), false
 	}
 	if result.Action != mcp.ElicitationResponseActionAccept || !approvalAccepted(result.Content) {
 		return mcp.NewToolResultError("write operation blocked: user did not approve"), false
 	}
 	return nil, true
+}
+
+type elicitationOutcome struct {
+	result *mcp.ElicitationResult
+	err    error
+}
+
+func (b Builder) requestElicitation(ctx context.Context, mcpServer *server.MCPServer, request mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+	if b.approvalRequestSlots != nil {
+		select {
+		case b.approvalRequestSlots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	outcomes := make(chan elicitationOutcome, 1)
+	go func() {
+		if b.approvalRequestSlots != nil {
+			defer func() { <-b.approvalRequestSlots }()
+		}
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				outcomes <- elicitationOutcome{err: fmt.Errorf("elicitation panic: %v", recovered)}
+			}
+		}()
+		result, err := mcpServer.RequestElicitation(ctx, request)
+		outcomes <- elicitationOutcome{result: result, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case outcome := <-outcomes:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return outcome.result, outcome.err
+	}
+}
+
+func approvalTimeoutOrDefault(value time.Duration) time.Duration {
+	if value == 0 {
+		return defaultApprovalTimeout
+	}
+	return value
 }
 
 func clientSupportsElicitation(ctx context.Context) bool {

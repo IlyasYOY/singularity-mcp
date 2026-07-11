@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -26,6 +27,7 @@ func TestBinaryHelp(t *testing.T) {
 			cmd.Env = append(cmd.Environ(),
 				"SINGULARITY_TOKEN=",
 				"SINGULARITY_TIMEOUT=nope",
+				"SINGULARITY_MCP_APPROVAL_TIMEOUT=nope",
 				"SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL=sometimes",
 			)
 			var stdout, stderr bytes.Buffer
@@ -38,11 +40,12 @@ func TestBinaryHelp(t *testing.T) {
 
 			got := stdout.String()
 			for _, want := range []string{
-				"singularity-mcp 0.3.0",
+				fmt.Sprintf("singularity-mcp %s", version),
 				"Usage:",
 				"-token string",
 				"-base-url string",
 				"-timeout duration",
+				"-approval-timeout duration",
 				"-require-write-approval",
 				"-version",
 				"-help, -h",

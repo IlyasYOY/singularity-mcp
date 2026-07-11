@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,6 +33,118 @@ func TestParsePrecedence(t *testing.T) {
 	}
 	if !got.Config.RequireWriteApproval {
 		t.Fatal("RequireWriteApproval = false")
+	}
+}
+
+func TestParseApprovalTimeoutDefault(t *testing.T) {
+	got, err := Parse(nil, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config.ApprovalTimeout != 2*time.Minute {
+		t.Fatalf("approval timeout = %s", got.Config.ApprovalTimeout)
+	}
+}
+
+func TestParseApprovalTimeoutFromEnv(t *testing.T) {
+	got, err := Parse(nil, func(key string) string {
+		if key == "SINGULARITY_MCP_APPROVAL_TIMEOUT" {
+			return "45s"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config.ApprovalTimeout != 45*time.Second {
+		t.Fatalf("approval timeout = %s", got.Config.ApprovalTimeout)
+	}
+}
+
+func TestParseApprovalTimeoutCLIOverridesEnv(t *testing.T) {
+	got, err := Parse([]string{"-approval-timeout", "15s"}, func(key string) string {
+		if key == "SINGULARITY_MCP_APPROVAL_TIMEOUT" {
+			return "45s"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config.ApprovalTimeout != 15*time.Second {
+		t.Fatalf("approval timeout = %s", got.Config.ApprovalTimeout)
+	}
+}
+
+func TestParseApprovalTimeoutCLIOverridesMalformedEnv(t *testing.T) {
+	got, err := Parse([]string{"--approval-timeout=15s"}, func(key string) string {
+		if key == "SINGULARITY_MCP_APPROVAL_TIMEOUT" {
+			return "nope"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config.ApprovalTimeout != 15*time.Second {
+		t.Fatalf("approval timeout = %s", got.Config.ApprovalTimeout)
+	}
+}
+
+func TestParseApprovalTimeoutRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  string
+		want string
+	}{
+		{name: "malformed environment", env: "nope", want: "SINGULARITY_MCP_APPROVAL_TIMEOUT"},
+		{name: "zero environment", env: "0s", want: "approval timeout must be positive"},
+		{name: "negative environment", env: "-1s", want: "approval timeout must be positive"},
+		{name: "malformed CLI", args: []string{"-approval-timeout", "nope"}, want: "approval-timeout"},
+		{name: "zero CLI", args: []string{"-approval-timeout", "0s"}, want: "approval timeout must be positive"},
+		{name: "negative CLI", args: []string{"-approval-timeout", "-1s"}, want: "approval timeout must be positive"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(tt.args, func(key string) string {
+				if key == "SINGULARITY_MCP_APPROVAL_TIMEOUT" {
+					return tt.env
+				}
+				return ""
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseApprovalTimeoutMalformedEnvIgnoredForHelpAndVersion(t *testing.T) {
+	tests := []struct {
+		flag        string
+		wantHelp    bool
+		wantVersion bool
+	}{
+		{flag: "-help", wantHelp: true},
+		{flag: "--h", wantHelp: true},
+		{flag: "-version", wantVersion: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.flag, func(t *testing.T) {
+			got, err := Parse([]string{tt.flag}, func(key string) string {
+				if key == "SINGULARITY_MCP_APPROVAL_TIMEOUT" {
+					return "nope"
+				}
+				return ""
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.HelpOnly != tt.wantHelp || got.VersionOnly != tt.wantVersion {
+				t.Fatalf("result = %#v", got)
+			}
+		})
 	}
 }
 

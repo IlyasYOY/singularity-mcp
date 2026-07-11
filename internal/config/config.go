@@ -7,18 +7,21 @@ import (
 	"io"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const (
-	DefaultBaseURL = "https://api.singularity-app.com"
-	DefaultTimeout = 30 * time.Second
+	DefaultBaseURL         = "https://api.singularity-app.com"
+	DefaultTimeout         = 30 * time.Second
+	DefaultApprovalTimeout = 2 * time.Minute
 )
 
 type Config struct {
 	Token                string
 	BaseURL              string
 	Timeout              time.Duration
+	ApprovalTimeout      time.Duration
 	RequireWriteApproval bool
 }
 
@@ -36,11 +39,13 @@ func Parse(args []string, getenv Getter) (Result, error) {
 	}
 	versionRequested := hasVersionFlag(args)
 	helpRequested := hasHelpFlag(args)
+	approvalTimeoutOverridden := hasNamedFlag(args, "approval-timeout")
 
 	cfg := Config{
 		Token:                getenv("SINGULARITY_TOKEN"),
 		BaseURL:              valueOrDefault(getenv("SINGULARITY_BASE_URL"), DefaultBaseURL),
 		Timeout:              DefaultTimeout,
+		ApprovalTimeout:      DefaultApprovalTimeout,
 		RequireWriteApproval: true,
 	}
 	if raw := getenv("SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL"); raw != "" {
@@ -67,12 +72,26 @@ func Parse(args []string, getenv Getter) (Result, error) {
 			cfg.Timeout = timeout
 		}
 	}
+	if raw := getenv("SINGULARITY_MCP_APPROVAL_TIMEOUT"); raw != "" && !approvalTimeoutOverridden {
+		approvalTimeout, err := time.ParseDuration(raw)
+		if err != nil {
+			if versionRequested || helpRequested {
+				approvalTimeout = DefaultApprovalTimeout
+			} else {
+				return Result{}, fmt.Errorf("parse SINGULARITY_MCP_APPROVAL_TIMEOUT: %w", err)
+			}
+		}
+		if err == nil {
+			cfg.ApprovalTimeout = approvalTimeout
+		}
+	}
 
 	fs := flag.NewFlagSet("singularity-mcp", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	token := fs.String("token", cfg.Token, "Singularity API bearer token")
 	baseURL := fs.String("base-url", cfg.BaseURL, "Singularity API base URL")
 	timeout := fs.Duration("timeout", cfg.Timeout, "HTTP request timeout")
+	approvalTimeout := fs.Duration("approval-timeout", cfg.ApprovalTimeout, "MCP write approval timeout")
 	requireWriteApproval := fs.Bool("require-write-approval", cfg.RequireWriteApproval, "require MCP elicitation approval before write operations")
 	versionOnly := fs.Bool("version", false, "print version and exit")
 	helpOnly := fs.Bool("help", false, "print help and exit")
@@ -84,6 +103,7 @@ func Parse(args []string, getenv Getter) (Result, error) {
 	cfg.Token = *token
 	cfg.BaseURL = *baseURL
 	cfg.Timeout = *timeout
+	cfg.ApprovalTimeout = *approvalTimeout
 	cfg.RequireWriteApproval = *requireWriteApproval
 	if *helpOnly || *helpShort {
 		return Result{Config: cfg, HelpOnly: true}, nil
@@ -96,6 +116,9 @@ func Parse(args []string, getenv Getter) (Result, error) {
 	}
 	if cfg.Timeout <= 0 {
 		return Result{}, errors.New("timeout must be positive")
+	}
+	if cfg.ApprovalTimeout <= 0 {
+		return Result{}, errors.New("approval timeout must be positive")
 	}
 	return Result{Config: cfg}, nil
 }
@@ -113,7 +136,21 @@ func hasVersionFlag(args []string) bool {
 func hasHelpFlag(args []string) bool {
 	for _, arg := range args {
 		switch arg {
-		case "-help", "--help", "-help=true", "--help=true", "-h", "-h=true":
+		case "-help", "--help", "-help=true", "--help=true", "-h", "--h", "-h=true", "--h=true":
+			return true
+		}
+	}
+	return false
+}
+
+func hasNamedFlag(args []string, name string) bool {
+	short := "-" + name
+	long := "--" + name
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == short || arg == long || strings.HasPrefix(arg, short+"=") || strings.HasPrefix(arg, long+"=") {
 			return true
 		}
 	}

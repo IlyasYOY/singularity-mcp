@@ -1,9 +1,9 @@
 module github.com/IlyasYOY/singularity-mcp
 
-go 1.26.4
+go 1.26.5
 
 require (
-	github.com/mark3labs/mcp-go v0.55.1
+	github.com/mark3labs/mcp-go v0.56.0
 	github.com/oapi-codegen/oapi-codegen/v2 v2.7.1
 	github.com/oapi-codegen/runtime v1.4.2
 )

@@ -41,11 +41,8 @@ func (e *APIError) Error() string {
 func safeSnippet(body []byte, token string) string {
 	const limit = 512
 	text := string(body)
-	if len(text) > limit {
-		text = text[:limit]
-	}
 	text = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' {
+		if r == '\n' || r == '\r' || r == '	' {
 			return ' '
 		}
 		if unicode.IsControl(r) {
@@ -53,9 +50,12 @@ func safeSnippet(body []byte, token string) string {
 		}
 		return r
 	}, text)
-	text = strings.TrimSpace(text)
 	if token != "" {
 		text = strings.ReplaceAll(text, token, "[REDACTED]")
+	}
+	text = strings.TrimSpace(text)
+	if len(text) > limit {
+		text = text[:limit]
 	}
 	return text
 }

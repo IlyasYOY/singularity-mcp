@@ -26,13 +26,22 @@ Flags:
         Singularity API base URL (env: SINGULARITY_BASE_URL, default: %s)
   -timeout duration
         HTTP request timeout (env: SINGULARITY_TIMEOUT, default: %s)
+  -approval-timeout duration
+        MCP write approval timeout (env: SINGULARITY_MCP_APPROVAL_TIMEOUT, default: %s)
   -require-write-approval
         require MCP elicitation approval before write operations (env: SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL, default: true)
   -version
         print version and exit
   -help, -h
         print help and exit
-`, version, config.DefaultBaseURL, config.DefaultTimeout)
+`, version, config.DefaultBaseURL, config.DefaultTimeout, config.DefaultApprovalTimeout)
+}
+
+func toolOptions(cfg config.Config) mcptools.Options {
+	return mcptools.Options{
+		RequireWriteApproval: cfg.RequireWriteApproval,
+		ApprovalTimeout:      cfg.ApprovalTimeout,
+	}
 }
 
 func main() {
@@ -60,9 +69,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	mcpServer := mcptools.NewServerWithOptions(client, catalog, version, mcptools.Options{
-		RequireWriteApproval: result.Config.RequireWriteApproval,
-	})
+	mcpServer := mcptools.NewServerWithOptions(client, catalog, version, toolOptions(result.Config))
 	if err := server.ServeStdio(mcpServer); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

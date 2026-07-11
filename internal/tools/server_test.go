@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,7 +194,7 @@ func TestRequireWriteApprovalAllowsSearchWithoutElicitation(t *testing.T) {
 	}))
 	defer api.Close()
 
-	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true, ApprovalTimeout: time.Second})
 	handler := &testElicitationHandler{action: mcp.ElicitationResponseActionAccept, approved: true}
 	c := newInProcessClientWithElicitation(t, srv, handler)
 	defer c.Close()
@@ -230,7 +231,7 @@ func TestRequireWriteApprovalAllowsReadsWithoutElicitation(t *testing.T) {
 	}))
 	defer api.Close()
 
-	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true, ApprovalTimeout: time.Second})
 	handler := &testElicitationHandler{action: mcp.ElicitationResponseActionAccept, approved: true}
 	c := newInProcessClientWithElicitation(t, srv, handler)
 	defer c.Close()
@@ -254,6 +255,147 @@ func TestRequireWriteApprovalAllowsReadsWithoutElicitation(t *testing.T) {
 	}
 }
 
+func TestWriteApprovalTimeoutFailsClosedBeforeAPICall(t *testing.T) {
+	catalog := testCatalog(t)
+	var httpCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	const approvalTimeout = 25 * time.Millisecond
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{
+		RequireWriteApproval: true,
+		ApprovalTimeout:      approvalTimeout,
+	})
+	handler := &blockingElicitationHandler{cancelled: make(chan struct{})}
+	c := newInProcessClientWithElicitation(t, srv, handler)
+	defer c.Close()
+	startClient(t, c)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "singularity_projects"
+	req.Params.Arguments = map[string]any{"operation": "delete", "id": "id-1", "confirm": true}
+	outerCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	result, err := c.CallTool(outerCtx, req)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("call returned after outer deadline: %s", elapsed)
+	}
+	if !result.IsError || resultText(result) != "write operation blocked: approval request timed out" {
+		t.Fatalf("timeout result = %#v (%q)", result, resultText(result))
+	}
+	select {
+	case <-handler.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("elicitation context was not cancelled")
+	}
+	if httpCalls != 0 {
+		t.Fatalf("http calls = %d", httpCalls)
+	}
+}
+
+func TestWriteApprovalTimeoutRejectsLateSuccessfulApproval(t *testing.T) {
+	catalog := testCatalog(t)
+	var httpCalls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{
+		RequireWriteApproval: true,
+		ApprovalTimeout:      25 * time.Millisecond,
+	})
+	handler := &lateApprovalHandler{cancelled: make(chan struct{})}
+	c := newInProcessClientWithElicitation(t, srv, handler)
+	defer c.Close()
+	startClient(t, c)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "singularity_projects"
+	req.Params.Arguments = map[string]any{"operation": "delete", "id": "id-1", "confirm": true}
+	result, err := c.CallTool(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || resultText(result) != "write operation blocked: approval request timed out" {
+		t.Fatalf("late approval result = %#v (%q)", result, resultText(result))
+	}
+	select {
+	case <-handler.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("elicitation context was not cancelled")
+	}
+	if got := httpCalls.Load(); got != 0 {
+		t.Fatalf("http calls = %d", got)
+	}
+}
+
+func TestWriteApprovalTimeoutBoundsHandlerIgnoringCancellation(t *testing.T) {
+	catalog := testCatalog(t)
+	var httpCalls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{
+		RequireWriteApproval: true,
+		ApprovalTimeout:      25 * time.Millisecond,
+	})
+	handler := &ignoringCancellationHandler{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	c := newInProcessClientWithElicitation(t, srv, handler)
+	defer c.Close()
+	startClient(t, c)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "singularity_projects"
+	req.Params.Arguments = map[string]any{"operation": "delete", "id": "id-1", "confirm": true}
+	type callResult struct {
+		result *mcp.CallToolResult
+		err    error
+	}
+	returned := make(chan callResult, 1)
+	go func() {
+		result, err := c.CallTool(context.Background(), req)
+		returned <- callResult{result: result, err: err}
+	}()
+
+	<-handler.started
+	select {
+	case got := <-returned:
+		close(handler.release)
+		<-handler.done
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if !got.result.IsError || resultText(got.result) != "write operation blocked: approval request timed out" {
+			t.Fatalf("blocked handler result = %#v (%q)", got.result, resultText(got.result))
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(handler.release)
+		<-handler.done
+		<-returned
+		t.Fatal("tool call remained blocked after approval timeout")
+	}
+	if got := httpCalls.Load(); got != 0 {
+		t.Fatalf("http calls = %d", got)
+	}
+}
+
 func TestRequireWriteApprovalBlocksUnapprovedWritesBeforeAPICall(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -274,7 +416,7 @@ func TestRequireWriteApprovalBlocksUnapprovedWritesBeforeAPICall(t *testing.T) {
 			}))
 			defer api.Close()
 
-			srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
+			srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true, ApprovalTimeout: time.Second})
 			handler := &testElicitationHandler{action: tt.action, approved: tt.approved}
 			c := newInProcessClientWithElicitation(t, srv, handler)
 			defer c.Close()
@@ -315,7 +457,7 @@ func TestRequireWriteApprovalFailsClosedWithoutClientElicitationSupport(t *testi
 	}))
 	defer api.Close()
 
-	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true, ApprovalTimeout: time.Second})
 	c, err := client.NewInProcessClient(srv)
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +490,7 @@ func TestRequireWriteApprovalAllowsApprovedWrites(t *testing.T) {
 	}))
 	defer api.Close()
 
-	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true})
+	srv := NewServerWithOptions(testClient(t, api.URL), catalog, "test", Options{RequireWriteApproval: true, ApprovalTimeout: time.Second})
 	handler := &testElicitationHandler{action: mcp.ElicitationResponseActionAccept, approved: true}
 	c := newInProcessClientWithElicitation(t, srv, handler)
 	defer c.Close()
@@ -461,7 +603,52 @@ func (h *testElicitationHandler) Elicit(ctx context.Context, request mcp.Elicita
 	}}, nil
 }
 
-func newInProcessClientWithElicitation(t *testing.T, srv *server.MCPServer, handler *testElicitationHandler) *client.Client {
+type blockingElicitationHandler struct {
+	cancelled chan struct{}
+}
+
+func (h *blockingElicitationHandler) Elicit(ctx context.Context, request mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+	_ = request
+	<-ctx.Done()
+	close(h.cancelled)
+	return nil, ctx.Err()
+}
+
+type lateApprovalHandler struct {
+	cancelled chan struct{}
+}
+
+func (h *lateApprovalHandler) Elicit(ctx context.Context, request mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+	_ = request
+	<-ctx.Done()
+	close(h.cancelled)
+	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{
+		Action:  mcp.ElicitationResponseActionAccept,
+		Content: map[string]any{"approved": true},
+	}}, nil
+}
+
+type ignoringCancellationHandler struct {
+	started chan struct{}
+	release chan struct{}
+	done    chan struct{}
+}
+
+func (h *ignoringCancellationHandler) Elicit(ctx context.Context, request mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+	_ = ctx
+	_ = request
+	close(h.started)
+	<-h.release
+	close(h.done)
+	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{
+		Action:  mcp.ElicitationResponseActionAccept,
+		Content: map[string]any{"approved": true},
+	}}, nil
+}
+
+func newInProcessClientWithElicitation(t *testing.T, srv *server.MCPServer, handler interface {
+	Elicit(context.Context, mcp.ElicitationRequest) (*mcp.ElicitationResult, error)
+}) *client.Client {
 	t.Helper()
 	return client.NewClient(
 		transport.NewInProcessTransportWithOptions(srv, transport.WithElicitationHandler(handler)),
