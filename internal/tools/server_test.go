@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -74,8 +75,8 @@ func TestToolContractOperationVariants(t *testing.T) {
 				for _, field := range fields {
 					hasNote = hasNote || field == "note"
 				}
-				if want := op.Tag == "task" || op.Tag == "project"; hasNote != want {
-					t.Fatalf("%s search fields=%v, note support=%v want=%v", group.ToolName, fields, hasNote, want)
+				if hasNote {
+					t.Fatalf("%s search fields must not advertise opaque note IDs: %v", group.ToolName, fields)
 				}
 				for _, key := range []string{"tag", "tags", "tagMode", "checked", "priority"} {
 					_, exists := props[key]
@@ -83,10 +84,31 @@ func TestToolContractOperationVariants(t *testing.T) {
 						t.Fatalf("%s search field %s exists=%v want=%v", group.ToolName, key, exists, want)
 					}
 				}
+				if _, exists := props["parent"]; !exists {
+					t.Fatalf("%s search must expose parent", group.ToolName)
+				}
+				if _, exists := props["isNotebook"]; exists != (op.Tag == "project") {
+					t.Fatalf("%s search isNotebook exists=%v", group.ToolName, exists)
+				}
+				if op.Tag == "task" {
+					for _, key := range []string{"checked", "priority"} {
+						values := props[key].(map[string]any)["enum"].([]any)
+						if fmt.Sprint(values) != "[0 1 2]" {
+							t.Fatalf("%s search %s enum=%v", group.ToolName, key, values)
+						}
+					}
+				}
 			}
 			for _, key := range []string{"maxCount", "offset"} {
 				if field, ok := props[key].(map[string]any); ok && field["type"] != "integer" {
 					t.Fatalf("%s.%s %s type=%v", group.ToolName, op.Name, key, field["type"])
+				}
+			}
+			if op.Tag == "task" && (op.Name == "list" || op.Name == "search") {
+				for _, key := range []string{"startDateFrom", "startDateTo"} {
+					if props[key].(map[string]any)["format"] != "date-time" {
+						t.Fatalf("%s.%s %s format=%v", group.ToolName, op.Name, key, props[key])
+					}
 				}
 			}
 			if group.ToolName == "singularity_tasks" && (op.Name == "inbox" || op.Name == "overdue" || op.Name == "today" || op.Name == "only-today") {
@@ -154,6 +176,8 @@ func TestInputSchemaValidationRejectsInvalidCallsBeforeHTTP(t *testing.T) {
 		{"singularity_tasks", map[string]any{"operation": "inbox", "all": false}},
 		{"singularity_tasks", map[string]any{"operation": "inbox", "compact": false}},
 		{"singularity_tasks", map[string]any{"operation": "overdue", "all": false}},
+		{"singularity_tasks", map[string]any{"operation": "list", "startDateFrom": "2026-07-04"}},
+		{"singularity_tasks", map[string]any{"operation": "search", "query": "x", "checked": 3}},
 	}
 	for _, tt := range bad {
 		req := mcp.CallToolRequest{}

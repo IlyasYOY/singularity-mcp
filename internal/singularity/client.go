@@ -177,6 +177,7 @@ func (c *APIClient) callAllPages(ctx context.Context, op *Operation, args map[st
 	if err != nil {
 		return nil, err
 	}
+	combined["count"] = len(combined[listField].([]any))
 	if stats.MorePossible {
 		combined["pagination"] = map[string]any{"scannedPages": stats.ScannedPages, "scannedItems": stats.ScannedItems, "truncated": true, "nextOffset": stats.NextOffset, "reason": stats.StopReason}
 	}
@@ -333,16 +334,17 @@ func taskDateListArgs(operation string, args map[string]any, today time.Time) ma
 	delete(out, "maxCount")
 	out["offset"] = float64(0)
 
+	tomorrow := today.AddDate(0, 0, 1)
 	switch operation {
 	case "overdue":
 		delete(out, "startDateFrom")
-		out["startDateTo"] = formatTaskDate(today.AddDate(0, 0, -1))
+		out["startDateTo"] = formatTaskDateTime(today)
 	case "today":
 		delete(out, "startDateFrom")
-		out["startDateTo"] = formatTaskDate(today)
+		out["startDateTo"] = formatTaskDateTime(tomorrow)
 	case "only-today":
-		out["startDateFrom"] = formatTaskDate(today)
-		out["startDateTo"] = formatTaskDate(today)
+		out["startDateFrom"] = formatTaskDateTime(today)
+		out["startDateTo"] = formatTaskDateTime(tomorrow)
 	}
 	return out
 }
@@ -371,8 +373,13 @@ func isActiveTask(task map[string]any) bool {
 	if removed, ok := boolArg(task["removed"]); ok && removed {
 		return false
 	}
-	checked, ok := numberArg(task["checked"])
-	return ok && checked == 0
+	if checked, ok := numberArg(task["checked"]); ok && checked != 0 {
+		return false
+	}
+	if complete, ok := numberArg(task["complete"]); ok && complete != 0 {
+		return false
+	}
+	return true
 }
 
 func taskStartDate(task map[string]any, location *time.Location) (time.Time, bool) {
@@ -380,8 +387,10 @@ func taskStartDate(task map[string]any, location *time.Location) (time.Time, boo
 	if !ok || start == "" {
 		return time.Time{}, false
 	}
-	if len(start) >= len(taskDateLayout) {
-		start = start[:len(taskDateLayout)]
+	if parsed, err := time.Parse(time.RFC3339Nano, start); err == nil {
+		local := parsed.In(location)
+		year, month, day := local.Date()
+		return time.Date(year, month, day, 0, 0, 0, 0, location), true
 	}
 	parsed, err := time.ParseInLocation(taskDateLayout, start, location)
 	if err != nil {
@@ -393,13 +402,12 @@ func taskStartDate(task map[string]any, location *time.Location) (time.Time, boo
 const taskDateLayout = "2006-01-02"
 
 func localDate(now time.Time) time.Time {
-	local := now.Local()
-	year, month, day := local.Date()
-	return time.Date(year, month, day, 0, 0, 0, 0, local.Location())
+	year, month, day := now.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, now.Location())
 }
 
-func formatTaskDate(date time.Time) string {
-	return date.Format(taskDateLayout)
+func formatTaskDateTime(date time.Time) string {
+	return date.Format(time.RFC3339)
 }
 
 func isInboxTask(task map[string]any) bool {
@@ -696,6 +704,9 @@ func validateArgs(op *Operation, args map[string]any) error {
 			return NewValidationError("at least one filter is required for delete_bulk")
 		}
 	}
+	if err := validateTaskDateFilters(op, args); err != nil {
+		return err
+	}
 	if op.BodySchema != nil {
 		body, ok := args["body"].(map[string]any)
 		if !ok {
@@ -706,6 +717,26 @@ func validateArgs(op *Operation, args map[string]any) error {
 			if !ok || value == nil {
 				return NewValidationError("body." + name + " is required")
 			}
+		}
+	}
+	return nil
+}
+
+func validateTaskDateFilters(op *Operation, args map[string]any) error {
+	if op == nil || op.Tag != "task" || (op.Name != "list" && op.Name != "search") {
+		return nil
+	}
+	for _, name := range []string{"startDateFrom", "startDateTo"} {
+		value, ok := args[name]
+		if !ok || value == nil {
+			continue
+		}
+		raw, ok := stringArg(value)
+		if !ok || raw == "" {
+			return NewValidationError(name + " must be an RFC3339 timestamp")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, raw); err != nil {
+			return NewValidationError(name + " must be an RFC3339 timestamp")
 		}
 	}
 	return nil

@@ -143,9 +143,6 @@ func parseSearchOptions(op *Operation, args map[string]any) (searchOptions, erro
 
 func validateSearchFields(op *Operation, fields []string) error {
 	allowed := map[string]bool{"id": true, "title": true}
-	if op.Tag == "task" || op.Tag == "project" {
-		allowed["note"] = true
-	}
 	for _, field := range fields {
 		if !allowed[field] {
 			return NewValidationError("unsupported search field: " + field)

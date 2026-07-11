@@ -99,12 +99,23 @@ Task date helpers are computed in the MCP client layer:
 - `today`: active tasks with `start` today or earlier
 - `only-today`: active tasks with `start` today only
 
+Calendar days use the MCP process's local timezone. Full timestamps are
+converted into that timezone before their calendar date is compared. A task is
+active when it is not removed and neither `checked` nor `complete` is non-zero;
+missing default fields are treated as zero. Direct task `startDateFrom` and
+`startDateTo` filters must be RFC3339 timestamps because the live API rejects
+date-only values even though its published OpenAPI schema declares plain strings.
+
 Search helpers are computed in the MCP client layer for tasks, projects, and
 tags. They fetch and filter one page at a time, stopping as soon as `limit+1`
-matches establish truncation. Search uses case-insensitive substring matching
-over `title` unless `fields` is provided. `all=false` examines exactly one API
-page; the default `all=true` remains bounded by the configured page, item,
-response-size, and operation-time limits. It is not an unlimited export mode.
+matches establish truncation. Search uses case-insensitive substring matching;
+`title` is searched by default, and `id` can be selected explicitly. Note-content
+search is not exposed because Singularity
+list/get responses contain opaque note IDs rather than note text. Project search
+also supports client-side `parent` and `isNotebook` filters. `all=false`
+examines exactly one API page; the default `all=true` remains bounded by the
+configured page, item, response-size, and operation-time limits. It is not an
+unlimited export mode.
 
 Bounded list/search results include additive continuation metadata when more data
 may exist. For example:
@@ -164,4 +175,11 @@ make vet
 make generate
 make install
 make version
+```
+
+Opt-in read-only live contract tests exercise every list endpoint and the task
+calendar helpers against the configured Singularity account:
+
+```bash
+SINGULARITY_LIVE=1 go test ./internal/singularity -run TestLive
 ```

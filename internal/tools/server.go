@@ -417,17 +417,18 @@ func schemaForOperation(op *singularity.Operation) map[string]any {
 		props["compact"] = map[string]any{"type": "boolean", "default": true}
 		props["query"] = map[string]any{"type": "string"}
 		fields := []string{"id", "title"}
-		if op.Tag == "task" || op.Tag == "project" {
-			fields = append(fields, "note")
-		}
 		props["fields"] = map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": fields}}
 		props["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
 		if op.Tag == "task" {
 			props["tag"] = map[string]any{"type": "string"}
 			props["tags"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 			props["tagMode"] = map[string]any{"type": "string", "enum": []string{"any", "all"}, "default": "any"}
-			props["checked"] = map[string]any{"type": "integer"}
-			props["priority"] = map[string]any{"type": "integer"}
+			props["checked"] = map[string]any{"type": "integer", "enum": []int{0, 1, 2}}
+			props["priority"] = map[string]any{"type": "integer", "enum": []int{0, 1, 2}}
+		}
+		if op.Tag == "project" {
+			props["isNotebook"] = map[string]any{"type": "boolean"}
+			props["parent"] = map[string]any{"type": "string"}
 		}
 	}
 	return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
@@ -455,6 +456,10 @@ func queryParamSchema(param singularity.Parameter) map[string]any {
 	}
 	if param.Name == "maxCount" || param.Name == "offset" {
 		schema["type"] = "integer"
+	}
+	if param.Name == "startDateFrom" || param.Name == "startDateTo" {
+		schema["format"] = "date-time"
+		schema["description"] = "RFC3339 timestamp. The live Singularity API rejects date-only values."
 	}
 	return schema
 }

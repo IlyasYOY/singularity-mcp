@@ -316,13 +316,14 @@ func TestClientPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	var decoded struct {
+		Count    int              `json:"count"`
 		Projects []map[string]any `json:"projects"`
 	}
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Projects) != PageSize+1 {
-		t.Fatalf("projects = %d", len(decoded.Projects))
+	if decoded.Count != PageSize+1 || len(decoded.Projects) != PageSize+1 {
+		t.Fatalf("count = %d, projects = %d", decoded.Count, len(decoded.Projects))
 	}
 	if strings.Join(offsets, ",") != "0,1000" {
 		t.Fatalf("offsets = %v", offsets)
@@ -408,7 +409,8 @@ func TestClientInboxOperationFiltersAndCompactsTasks(t *testing.T) {
 
 func TestClientTaskDateOperationsFilterActiveTasks(t *testing.T) {
 	catalog := testCatalog(t)
-	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local)
+	moscow := time.FixedZone("Europe/Moscow", 3*60*60)
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, moscow)
 
 	tests := []struct {
 		name              string
@@ -420,23 +422,23 @@ func TestClientTaskDateOperationsFilterActiveTasks(t *testing.T) {
 		{
 			name:              "overdue",
 			operation:         "overdue",
-			wantIDs:           []string{"T-overdue", "T-overdue-datetime", "T-complete-field"},
+			wantIDs:           []string{"T-overdue", "T-overdue-datetime", "T-overdue-sparse"},
 			wantStartDateFrom: "",
-			wantStartDateTo:   "2026-07-03",
+			wantStartDateTo:   "2026-07-04T00:00:00+03:00",
 		},
 		{
 			name:              "today",
 			operation:         "today",
-			wantIDs:           []string{"T-overdue", "T-overdue-datetime", "T-today", "T-complete-field"},
+			wantIDs:           []string{"T-overdue", "T-overdue-datetime", "T-overdue-sparse", "T-today", "T-today-utc-boundary"},
 			wantStartDateFrom: "",
-			wantStartDateTo:   "2026-07-04",
+			wantStartDateTo:   "2026-07-05T00:00:00+03:00",
 		},
 		{
 			name:              "only today",
 			operation:         "only-today",
-			wantIDs:           []string{"T-today"},
-			wantStartDateFrom: "2026-07-04",
-			wantStartDateTo:   "2026-07-04",
+			wantIDs:           []string{"T-today", "T-today-utc-boundary"},
+			wantStartDateFrom: "2026-07-04T00:00:00+03:00",
+			wantStartDateTo:   "2026-07-05T00:00:00+03:00",
 		},
 	}
 
@@ -450,6 +452,14 @@ func TestClientTaskDateOperationsFilterActiveTasks(t *testing.T) {
 			var gotQuery string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotQuery = r.URL.RawQuery
+				for _, name := range []string{"startDateFrom", "startDateTo"} {
+					if value := r.URL.Query().Get(name); value != "" {
+						if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+							http.Error(w, name+" must be an ISOString", http.StatusBadRequest)
+							return
+						}
+					}
+				}
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]any{"tasks": taskDateFixture()})
 			}))
@@ -498,6 +508,48 @@ func TestClientTaskDateOperationsFilterActiveTasks(t *testing.T) {
 				t.Fatalf("tasks = %v, want %v", got, tt.wantIDs)
 			}
 		})
+	}
+}
+
+func TestClientRejectsInvalidTaskDateFiltersBeforeHTTP(t *testing.T) {
+	catalog := testCatalog(t)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"tasks":[]}`))
+	}))
+	defer srv.Close()
+
+	client := testClient(t, srv.URL)
+	for _, operation := range []string{"list", "search"} {
+		op, _ := catalog.Operation("singularity_tasks", operation)
+		args := map[string]any{"startDateFrom": "2026-07-04"}
+		if operation == "search" {
+			args["query"] = "contract"
+		}
+		_, err := client.Call(context.Background(), op, args)
+		if err == nil || !strings.Contains(err.Error(), "startDateFrom must be an RFC3339 timestamp") {
+			t.Fatalf("%s error = %v", operation, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("HTTP calls = %d", calls)
+	}
+}
+
+func TestTaskDateBoundariesHonorLocationAndDST(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	today := localDate(time.Date(2026, 3, 29, 12, 0, 0, 0, berlin))
+	args := taskDateListArgs("only-today", nil, today)
+	if args["startDateFrom"] != "2026-03-29T00:00:00+01:00" || args["startDateTo"] != "2026-03-30T00:00:00+02:00" {
+		t.Fatalf("DST boundaries = %#v", args)
+	}
+	date, ok := taskStartDate(map[string]any{"start": "2026-03-28T23:00:00Z"}, berlin)
+	if !ok || !date.Equal(today) {
+		t.Fatalf("parsed date = %s, ok = %v, today = %s", date, ok, today)
 	}
 }
 
@@ -620,13 +672,13 @@ func TestClientSearchTasksForwardsServerFiltersOnly(t *testing.T) {
 	client := testClient(t, srv.URL)
 	_, err := client.Call(context.Background(), op, map[string]any{
 		"query":                         "mcp",
-		"fields":                        []any{"title", "note"},
+		"fields":                        []any{"title"},
 		"limit":                         float64(5),
 		"tagMode":                       "all",
 		"projectId":                     "P-1",
 		"parent":                        "T-parent",
-		"startDateFrom":                 "2026-01-01",
-		"startDateTo":                   "2026-01-31",
+		"startDateFrom":                 "2026-01-01T00:00:00Z",
+		"startDateTo":                   "2026-02-01T00:00:00Z",
 		"includeArchived":               true,
 		"includeAllRecurrenceInstances": false,
 		"all":                           false,
@@ -634,7 +686,7 @@ func TestClientSearchTasksForwardsServerFiltersOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"projectId=P-1", "parent=T-parent", "startDateFrom=2026-01-01", "startDateTo=2026-01-31", "includeArchived=true", "includeAllRecurrenceInstances=false"} {
+	for _, want := range []string{"projectId=P-1", "parent=T-parent", "startDateFrom=2026-01-01T00%3A00%3A00Z", "startDateTo=2026-02-01T00%3A00%3A00Z", "includeArchived=true", "includeAllRecurrenceInstances=false"} {
 		if !strings.Contains(gotQuery, want) {
 			t.Fatalf("query %q missing %s", gotQuery, want)
 		}
@@ -743,6 +795,7 @@ func TestClientSearchProjectsAndTags(t *testing.T) {
 func TestClientSearchValidation(t *testing.T) {
 	catalog := testCatalog(t)
 	taskSearch, _ := catalog.Operation("singularity_tasks", "search")
+	projectSearch, _ := catalog.Operation("singularity_projects", "search")
 	tagSearch, _ := catalog.Operation("singularity_tags", "search")
 	client := testClient(t, "https://api.example")
 	tests := []struct {
@@ -753,6 +806,8 @@ func TestClientSearchValidation(t *testing.T) {
 	}{
 		{"empty criteria", taskSearch, map[string]any{}, "query or at least one search filter"},
 		{"bad field", taskSearch, map[string]any{"query": "x", "fields": []any{"bad"}}, "unsupported search field"},
+		{"note unsupported for tasks", taskSearch, map[string]any{"query": "x", "fields": []any{"note"}}, "unsupported search field"},
+		{"note unsupported for projects", projectSearch, map[string]any{"query": "x", "fields": []any{"note"}}, "unsupported search field"},
 		{"note unsupported for tags", tagSearch, map[string]any{"query": "x", "fields": []any{"note"}}, "unsupported search field"},
 		{"bad tag mode", taskSearch, map[string]any{"query": "x", "tagMode": "nope"}, "tagMode"},
 		{"limit low", taskSearch, map[string]any{"query": "x", "limit": float64(0)}, "limit"},
@@ -836,7 +891,9 @@ func taskDateFixture() []map[string]any {
 	return []map[string]any{
 		{"id": "T-overdue", "title": "Overdue", "start": "2026-07-03", "checked": float64(0), "removed": false},
 		{"id": "T-overdue-datetime", "title": "Overdue datetime", "start": "2026-07-02T08:00:00+03:00", "checked": float64(0), "removed": false},
+		{"id": "T-overdue-sparse", "title": "Overdue sparse", "start": "2026-07-03T09:00:00+03:00"},
 		{"id": "T-today", "title": "Today", "start": "2026-07-04T09:00:00+03:00", "checked": float64(0), "removed": false},
+		{"id": "T-today-utc-boundary", "title": "Today UTC boundary", "start": "2026-07-03T21:00:00Z"},
 		{"id": "T-future", "title": "Future", "start": "2026-07-05", "checked": float64(0), "removed": false},
 		{"id": "T-done", "title": "Done", "start": "2026-07-03", "checked": float64(1), "removed": false},
 		{"id": "T-cancelled", "title": "Cancelled", "start": "2026-07-04", "checked": float64(2), "removed": false},
