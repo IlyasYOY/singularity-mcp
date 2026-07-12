@@ -11,7 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func usage(version string) string {
 	return fmt.Sprintf(`singularity-mcp %s
