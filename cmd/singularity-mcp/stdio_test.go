@@ -48,11 +48,6 @@ func TestBinaryHelp(t *testing.T) {
 				"-timeout duration",
 				"-approval-timeout duration",
 				"-require-write-approval",
-				"-transport string",
-				"-http-address string",
-				"-http-path string",
-				"-tls-cert string",
-				"-tls-key string",
 				"-version",
 				"-help, -h",
 			} {

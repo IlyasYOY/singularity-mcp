@@ -27,67 +27,14 @@ Releases are created manually from GitHub Actions:
 
 ## Run
 
-### Stdio
-
 ```bash
 singularity-mcp -token "$SINGULARITY_TOKEN"
 singularity-mcp -help
 ```
 
-### Streamable HTTP And HTTPS
-
-HTTP mode takes the Singularity token from every MCP request and never falls
-back to a token configured on the process:
-
-```http
-Authorization: Bearer <singularity-token>
-```
-
-Run cleartext HTTP on loopback for a same-host reverse proxy:
-
-```bash
-singularity-mcp -transport http -http-address 127.0.0.1:8080
-```
-
-Expose `https://singularity.example.com/mcp` from Caddy, forwarding to the
-loopback listener:
-
-```caddyfile
-singularity.example.com {
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-Or serve HTTPS directly with certificate files:
-
-```bash
-singularity-mcp \
-  -transport http \
-  -http-address :8443 \
-  -tls-cert /etc/letsencrypt/live/singularity.example.com/fullchain.pem \
-  -tls-key /etc/letsencrypt/live/singularity.example.com/privkey.pem
-```
-
-Native HTTPS requires TLS 1.2 or newer. Without certificate flags, the server
-refuses non-loopback listen addresses so a bearer token cannot accidentally be
-sent over public cleartext HTTP. `GET /healthz` is unauthenticated and returns
-only `{"status":"ok"}`; `/mcp` requires the bearer header for `POST`, `GET`, and
-`DELETE`. Do not put tokens in the MCP URL, query string, logs, or proxy config.
-
-The current ChatGPT developer-mode documentation supports streaming HTTP and
-requires a reachable HTTPS MCP endpoint, but its documented authentication
-modes are OAuth, no authentication, and mixed OAuth/no-auth. It does not offer a
-raw API-key header mode. Therefore this pass-through mode works with MCP clients
-that can set HTTP headers, while direct ChatGPT linking remains deferred until
-OAuth is implemented. Do not work around this by exposing a no-auth server with
-a process-level Singularity token.
-
-- [Connect from ChatGPT](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt)
-- [ChatGPT developer mode](https://developers.openai.com/api/docs/guides/developer-mode)
-
 Config precedence is CLI flag, then environment, then default:
 
-- `-token` / `SINGULARITY_TOKEN` used by stdio and rejected in HTTP mode
+- `-token` / `SINGULARITY_TOKEN` required for API calls
 - `-base-url` / `SINGULARITY_BASE_URL`, default `https://api.singularity-app.com`
 - `-timeout` / `SINGULARITY_TIMEOUT`, default `30s` (each HTTP request)
 - `-approval-timeout` / `SINGULARITY_MCP_APPROVAL_TIMEOUT`, default `2m`
@@ -96,11 +43,6 @@ Config precedence is CLI flag, then environment, then default:
 - `-max-items` / `SINGULARITY_MCP_MAX_ITEMS`, default `10000`
 - `-max-response-bytes` / `SINGULARITY_MCP_MAX_RESPONSE_BYTES`, default `1048576` (1 MiB)
 - `-require-write-approval` / `SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL`, default `true`
-- `-transport` / `SINGULARITY_MCP_TRANSPORT`, default `stdio`; values `stdio`, `http`
-- `-http-address` / `SINGULARITY_MCP_HTTP_ADDRESS`, default `127.0.0.1:8080`
-- `-http-path` / `SINGULARITY_MCP_HTTP_PATH`, default `/mcp`
-- `-tls-cert` / `SINGULARITY_MCP_TLS_CERT`, native HTTPS certificate file
-- `-tls-key` / `SINGULARITY_MCP_TLS_KEY`, native HTTPS private key file
 - `-version` prints the CLI version and exits
 - `-help` / `-h` prints CLI usage and exits
 
@@ -121,10 +63,6 @@ Three distinct timeout boundaries apply:
 
 As with all stdio MCP traffic, the client must continue draining server stdout for
 timeout results and other protocol messages to be delivered.
-Streamable HTTP clients must keep the listening `GET` connection active when
-they advertise elicitation support, because write approval requests are sent on
-that server-to-client stream. Clients without elicitation support continue to
-fail closed for writes unless the operator explicitly disables write approval.
 Set `-require-write-approval=false` or
 `SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL=false` only for trusted clients or
 environments where write prompts are intentionally disabled.
