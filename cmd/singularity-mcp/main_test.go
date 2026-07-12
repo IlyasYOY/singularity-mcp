@@ -31,12 +31,25 @@ func TestUsageIncludesFlagsAndDefaults(t *testing.T) {
 		"-max-response-bytes int",
 		"SINGULARITY_MCP_MAX_RESPONSE_BYTES",
 		"-require-write-approval",
+		"-transport string",
+		"SINGULARITY_MCP_TRANSPORT",
+		"-http-address string",
+		"-http-path string",
+		"-tls-cert string",
+		"-tls-key string",
 		"-version",
 		"-help, -h",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("usage() missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+func TestToolOptionsUsesRequestTokenForHTTP(t *testing.T) {
+	got := toolOptions(config.Config{Transport: "http"})
+	if got.TokenProvider == nil {
+		t.Fatal("TokenProvider is nil")
 	}
 }
 

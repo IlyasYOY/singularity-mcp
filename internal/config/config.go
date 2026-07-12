@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +21,9 @@ const (
 	DefaultMaxPages               = 100
 	DefaultMaxItems               = 10000
 	DefaultMaxResponseBytes int64 = 1048576
+	DefaultTransport              = "stdio"
+	DefaultHTTPAddress            = "127.0.0.1:8080"
+	DefaultHTTPPath               = "/mcp"
 )
 
 type Config struct {
@@ -31,6 +36,11 @@ type Config struct {
 	MaxPages             int
 	MaxItems             int
 	MaxResponseBytes     int64
+	Transport            string
+	HTTPAddress          string
+	HTTPPath             string
+	TLSCert              string
+	TLSKey               string
 }
 
 type Result struct {
@@ -63,6 +73,11 @@ func Parse(args []string, getenv Getter) (Result, error) {
 		MaxPages:             DefaultMaxPages,
 		MaxItems:             DefaultMaxItems,
 		MaxResponseBytes:     DefaultMaxResponseBytes,
+		Transport:            valueOrDefault(getenv("SINGULARITY_MCP_TRANSPORT"), DefaultTransport),
+		HTTPAddress:          valueOrDefault(getenv("SINGULARITY_MCP_HTTP_ADDRESS"), DefaultHTTPAddress),
+		HTTPPath:             valueOrDefault(getenv("SINGULARITY_MCP_HTTP_PATH"), DefaultHTTPPath),
+		TLSCert:              getenv("SINGULARITY_MCP_TLS_CERT"),
+		TLSKey:               getenv("SINGULARITY_MCP_TLS_KEY"),
 	}
 	bypassEnv := versionRequested || helpRequested
 	if err := parseDurationEnv(getenv, "SINGULARITY_MCP_OPERATION_TIMEOUT", operationTimeoutOverridden, bypassEnv, &cfg.OperationTimeout); err != nil {
@@ -126,6 +141,11 @@ func Parse(args []string, getenv Getter) (Result, error) {
 	maxItems := fs.Int("max-items", cfg.MaxItems, "maximum combined items per all/search operation")
 	maxResponseBytes := fs.Int64("max-response-bytes", cfg.MaxResponseBytes, "maximum bytes per HTTP response")
 	requireWriteApproval := fs.Bool("require-write-approval", cfg.RequireWriteApproval, "require MCP elicitation approval before write operations")
+	transport := fs.String("transport", cfg.Transport, "MCP transport: stdio or http")
+	httpAddress := fs.String("http-address", cfg.HTTPAddress, "HTTP listen address")
+	httpPath := fs.String("http-path", cfg.HTTPPath, "Streamable HTTP MCP endpoint path")
+	tlsCert := fs.String("tls-cert", cfg.TLSCert, "TLS certificate file for native HTTPS")
+	tlsKey := fs.String("tls-key", cfg.TLSKey, "TLS private key file for native HTTPS")
 	versionOnly := fs.Bool("version", false, "print version and exit")
 	helpOnly := fs.Bool("help", false, "print help and exit")
 	helpShort := fs.Bool("h", false, "print help and exit")
@@ -142,6 +162,11 @@ func Parse(args []string, getenv Getter) (Result, error) {
 	cfg.MaxPages = *maxPages
 	cfg.MaxItems = *maxItems
 	cfg.MaxResponseBytes = *maxResponseBytes
+	cfg.Transport = strings.ToLower(strings.TrimSpace(*transport))
+	cfg.HTTPAddress = strings.TrimSpace(*httpAddress)
+	cfg.HTTPPath = strings.TrimSpace(*httpPath)
+	cfg.TLSCert = strings.TrimSpace(*tlsCert)
+	cfg.TLSKey = strings.TrimSpace(*tlsKey)
 	if *helpOnly || *helpShort {
 		return Result{Config: cfg, HelpOnly: true}, nil
 	}
@@ -169,7 +194,57 @@ func Parse(args []string, getenv Getter) (Result, error) {
 	if cfg.MaxResponseBytes <= 0 {
 		return Result{}, errors.New("max response bytes must be positive")
 	}
+	if err := validateTransport(cfg); err != nil {
+		return Result{}, err
+	}
 	return Result{Config: cfg}, nil
+}
+
+func validateTransport(cfg Config) error {
+	switch cfg.Transport {
+	case "stdio":
+		if cfg.TLSCert != "" || cfg.TLSKey != "" {
+			return errors.New("TLS certificate options require HTTP transport")
+		}
+		return nil
+	case "http":
+	default:
+		return fmt.Errorf("transport must be stdio or http: %q", cfg.Transport)
+	}
+	if cfg.Token != "" {
+		return errors.New("token flag/environment is not allowed with HTTP transport; use an Authorization bearer header")
+	}
+	if cfg.HTTPAddress == "" {
+		return errors.New("HTTP address is required")
+	}
+	if cfg.HTTPPath == "/" || !strings.HasPrefix(cfg.HTTPPath, "/") || path.Clean(cfg.HTTPPath) != cfg.HTTPPath || cfg.HTTPPath == "/healthz" {
+		return fmt.Errorf("HTTP path must be a clean absolute path other than / or /healthz: %q", cfg.HTTPPath)
+	}
+	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
+		return errors.New("both TLS certificate and key must be provided")
+	}
+	if cfg.TLSCert == "" && !isLoopbackAddress(cfg.HTTPAddress) {
+		return errors.New("cleartext HTTP may listen only on loopback; configure TLS for a non-loopback address")
+	}
+	u, _ := url.Parse(cfg.BaseURL)
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return errors.New("HTTP transport requires an HTTPS Singularity base URL unless the API host is loopback")
+	}
+	return nil
+}
+
+func isLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	return err == nil && isLoopbackHost(host)
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func parseDurationEnv(getenv Getter, key string, overridden, bypass bool, dst *time.Duration) error {
@@ -260,6 +335,9 @@ func validateBaseURL(value string) error {
 	}
 	if u.Scheme == "" || u.Host == "" {
 		return fmt.Errorf("base URL must include scheme and host: %q", value)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("base URL scheme must be http or https: %q", value)
 	}
 	return nil
 }

@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/IlyasYOY/singularity-mcp/internal/config"
+	"github.com/IlyasYOY/singularity-mcp/internal/httptransport"
 	"github.com/IlyasYOY/singularity-mcp/internal/singularity"
 	mcptools "github.com/IlyasYOY/singularity-mcp/internal/tools"
 	"github.com/IlyasYOY/singularity-mcp/openapi"
@@ -21,7 +26,7 @@ Usage:
 
 Flags:
   -token string
-        Singularity API bearer token (env: SINGULARITY_TOKEN)
+        Singularity API bearer token for stdio (env: SINGULARITY_TOKEN)
   -base-url string
         Singularity API base URL (env: SINGULARITY_BASE_URL, default: %s)
   -timeout duration
@@ -38,20 +43,36 @@ Flags:
         maximum bytes per HTTP response (env: SINGULARITY_MCP_MAX_RESPONSE_BYTES, default: %d)
   -require-write-approval
         require MCP elicitation approval before write operations (env: SINGULARITY_MCP_REQUIRE_WRITE_APPROVAL, default: true)
+  -transport string
+        MCP transport: stdio or http (env: SINGULARITY_MCP_TRANSPORT, default: %s)
+  -http-address string
+        HTTP listen address (env: SINGULARITY_MCP_HTTP_ADDRESS, default: %s)
+  -http-path string
+        Streamable HTTP endpoint path (env: SINGULARITY_MCP_HTTP_PATH, default: %s)
+  -tls-cert string
+        TLS certificate file for native HTTPS (env: SINGULARITY_MCP_TLS_CERT)
+  -tls-key string
+        TLS private key file for native HTTPS (env: SINGULARITY_MCP_TLS_KEY)
   -version
         print version and exit
   -help, -h
         print help and exit
-`, version, config.DefaultBaseURL, config.DefaultTimeout, config.DefaultApprovalTimeout, config.DefaultOperationTimeout, config.DefaultMaxPages, config.DefaultMaxItems, config.DefaultMaxResponseBytes)
+`, version, config.DefaultBaseURL, config.DefaultTimeout, config.DefaultApprovalTimeout, config.DefaultOperationTimeout, config.DefaultMaxPages, config.DefaultMaxItems, config.DefaultMaxResponseBytes, config.DefaultTransport, config.DefaultHTTPAddress, config.DefaultHTTPPath)
 }
 
 func toolOptions(cfg config.Config) mcptools.Options {
-	return mcptools.Options{
+	options := mcptools.Options{
 		RequireWriteApproval: cfg.RequireWriteApproval,
 		ApprovalTimeout:      cfg.ApprovalTimeout,
 		OperationTimeout:     cfg.OperationTimeout,
 	}
+	if cfg.Transport == "http" {
+		options.TokenProvider = httptransport.TokenFromContext
+	}
+	return options
 }
+
+const shutdownTimeout = 10 * time.Second
 
 func main() {
 	result, err := config.Parse(os.Args[1:], os.Getenv)
@@ -81,8 +102,45 @@ func main() {
 		os.Exit(1)
 	}
 	mcpServer := mcptools.NewServerWithOptions(client, catalog, version, toolOptions(result.Config))
-	if err := server.ServeStdio(mcpServer); err != nil {
+	if result.Config.Transport == "stdio" {
+		err = server.ServeStdio(mcpServer)
+	} else {
+		err = serveHTTP(result.Config, mcpServer)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func serveHTTP(cfg config.Config, mcpServer *server.MCPServer) error {
+	httpServer := httptransport.New(mcpServer, httptransport.Config{
+		Address: cfg.HTTPAddress,
+		Path:    cfg.HTTPPath,
+		TLSCert: cfg.TLSCert,
+		TLSKey:  cfg.TLSKey,
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpServer.Serve() }()
+
+	protocol := "http"
+	if cfg.TLSCert != "" {
+		protocol = "https"
+	}
+	fmt.Fprintf(os.Stderr, "serving Streamable HTTP at %s://%s%s\n", protocol, cfg.HTTPAddress, cfg.HTTPPath)
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shut down HTTP server: %w", err)
+		}
+		return <-errCh
 	}
 }

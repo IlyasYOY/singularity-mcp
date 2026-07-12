@@ -23,6 +23,7 @@ type Builder struct {
 	RequireWriteApproval bool
 	ApprovalTimeout      time.Duration
 	OperationTimeout     time.Duration
+	TokenProvider        TokenProvider
 	// approvalRequestSlots bounds a transport or handler that ignores context
 	// cancellation to one orphaned elicitation request at a time.
 	approvalRequestSlots chan struct{}
@@ -33,7 +34,12 @@ type Options struct {
 	RequireWriteApproval bool
 	ApprovalTimeout      time.Duration
 	OperationTimeout     time.Duration
+	TokenProvider        TokenProvider
 }
+
+// TokenProvider returns the Singularity bearer token for the current request.
+// HTTP transports use this to keep credentials request-scoped.
+type TokenProvider func(context.Context) (string, error)
 
 const (
 	defaultApprovalTimeout  = 2 * time.Minute
@@ -67,6 +73,7 @@ func NewServerWithOptions(client *singularity.APIClient, catalog *singularity.Ca
 		RequireWriteApproval: options.RequireWriteApproval,
 		ApprovalTimeout:      approvalTimeoutOrDefault(options.ApprovalTimeout),
 		OperationTimeout:     operationTimeoutOrDefault(options.OperationTimeout),
+		TokenProvider:        options.TokenProvider,
 		approvalRequestSlots: make(chan struct{}, 1),
 	}
 	builder.Register(mcpServer)
@@ -100,6 +107,14 @@ func (b Builder) Register(mcpServer *server.MCPServer) {
 }
 
 func (b Builder) handleTool(ctx context.Context, group *singularity.ToolGroup, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	apiClient := b.Client
+	if b.TokenProvider != nil {
+		token, err := b.TokenProvider(ctx)
+		if err != nil {
+			return mcp.NewToolResultError(singularity.StructuredError(err)), nil
+		}
+		apiClient = b.Client.ForToken(token)
+	}
 	args := req.GetArguments()
 	operationName, ok := args["operation"].(string)
 	if !ok || operationName == "" {
@@ -109,7 +124,7 @@ func (b Builder) handleTool(ctx context.Context, group *singularity.ToolGroup, r
 	if !ok {
 		return mcp.NewToolResultError(singularity.StructuredError(singularity.NewValidationError("invalid operation: " + operationName))), nil
 	}
-	prepared, err := b.Client.PrepareCall(op, args)
+	prepared, err := apiClient.PrepareCall(op, args)
 	if err != nil {
 		return mcp.NewToolResultError(singularity.StructuredError(err)), nil
 	}
@@ -117,7 +132,7 @@ func (b Builder) handleTool(ctx context.Context, group *singularity.ToolGroup, r
 		return approvalResult, nil
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, operationTimeoutOrDefault(b.OperationTimeout))
-	raw, err := b.Client.ExecutePrepared(operationCtx, prepared)
+	raw, err := apiClient.ExecutePrepared(operationCtx, prepared)
 	operationErr := operationCtx.Err()
 	cancel()
 	if errors.Is(operationErr, context.DeadlineExceeded) {

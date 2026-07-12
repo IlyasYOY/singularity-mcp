@@ -106,6 +106,14 @@ func NewAPIClient(baseURL, token string, timeout time.Duration, opts ...APIClien
 	return client, nil
 }
 
+// ForToken returns an independent client view that uses token for one caller.
+// The underlying HTTP client and immutable limits are shared safely.
+func (c *APIClient) ForToken(token string) *APIClient {
+	clone := *c
+	clone.token = token
+	return &clone
+}
+
 type PreparedCall struct {
 	Operation *Operation
 	Args      map[string]any

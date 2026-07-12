@@ -911,3 +911,18 @@ func taskIDs(tasks []map[string]any) []string {
 	}
 	return ids
 }
+
+func TestAPIClientForTokenReturnsIndependentView(t *testing.T) {
+	base, err := NewAPIClient("https://api.example", "base-token", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := base.ForToken("first-token")
+	second := base.ForToken("second-token")
+	if base.token != "base-token" || first.token != "first-token" || second.token != "second-token" {
+		t.Fatalf("tokens base=%q first=%q second=%q", base.token, first.token, second.token)
+	}
+	if first == base || second == base || first.httpClient != base.httpClient || second.httpClient != base.httpClient {
+		t.Fatal("ForToken did not create independent views sharing the HTTP client")
+	}
+}
